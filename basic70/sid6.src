@@ -1,0 +1,388 @@
+	.page
+	.subttl C128+ six-voice sound (second SID at $D420)
+
+;*****************************************************************************
+;*
+;*  C128+ patch: SOUND, PLAY, VOL and FILTER for two SIDs (six voices)
+;*
+;*  Voices 1-3 play on the SID at $D400, voices 4-6 on the SID at $D420,
+;*  the same layout Commodore used for the C65 (BASIC 10).
+;*
+;*	SOUND v,...		v = 1..6
+;*	PLAY "V4 ..."		V1..V6, U and X act on the SID of the voice
+;*	VOL a [,b]		a = SID 1, b = SID 2 (default: both = a)
+;*	FILTER f,l,b,h,r	sets cut-off, resonance and mode on both SIDs
+;*
+;*  All existing BASIC entry points keep their addresses. Changed routines
+;*  jump here; this code sits in the free space after the monitor.
+;*
+;*  RAM: $1B80-$1BDE (top of the function key area, $1800-$1BFF).
+;*
+;*****************************************************************************
+
+sid2_ofs	=$20		;offset of the second SID from sid ($d400)
+
+; RAM (six-voice versions of BASIC's music tables)
+
+voices6		=$1b80		;12: PLAY note counters, 2 per voice
+wave06		=$1b8c		;6:  PLAY waveform per voice
+sound_time_lo6	=$1b92		;6:  SOUND tables, one byte per voice ...
+sound_time_hi6	=$1b98
+sound_max_lo6	=$1b9e		;    max..freq must stay in this order,
+sound_max_hi6	=$1ba4		;    6 bytes apart (see sound6)
+sound_min_lo6	=$1baa
+sound_min_hi6	=$1bb0
+sound_direction6 =$1bb6
+sound_step_lo6	=$1bbc
+sound_step_hi6	=$1bc2
+sound_freq_lo6	=$1bc8
+sound_freq_hi6	=$1bce
+fil6		=$1bd4		;10: filter/volume, 5 bytes per SID
+				;    +0/+1 cut-off, +2 resonance/routing,
+				;    +3 mode/volume, +4 current mode/volume
+vol2tmp		=$1bde		;1:  temp for VOL
+
+; tables
+
+offtab6	.byte 0,7,14,sid2_ofs,sid2_ofs+7,sid2_ofs+14	;register offset per voice
+times26	.byte 0,2,4,6,8,10				;voice*2
+vbit6	.byte 1,2,4,1,2,4				;filter routing bit per voice
+fofs6	.byte 0,0,0,5,5,5				;fil6 offset per voice
+sofs6	.byte 0,0,0,sid2_ofs,sid2_ofs,sid2_ofs		;SID base offset per voice
+
+	.page
+;*****************************************************************************
+;*  SOUND v, f, d [,[dir] [,[m] [,[s] [,[w] [,p] ]]]]	(v = 1..6)
+;*****************************************************************************
+
+sound6	jsr getbyt		;get voice number in .X
+	dex			;adjust 1..6 to 0..5
+	cpx #6
+	bcc 10$
+98$	jmp fcerr		;illegal value
+
+10$	stx sound_voice
+
+	jsr comwrd		;eat comma, get frequency in y,a
+	sty temp_max_lo		;save our copy of max, also set up as current
+	sta temp_max_hi
+	sty temp_freq_lo
+	sta temp_freq_hi
+
+	jsr comwrd		;eat comma, get number of jiffys to play
+	cmp #$80
+	bcs 98$
+	sty temp_time_lo
+	sta temp_time_hi
+
+	jsr optzer		;get optional sweep (default = 0, up)
+	cpx #3
+97$	bcs 98$
+	txa
+	sta temp_direction
+	and #1			;set .Z if sweep up or oscillate
+	php			;save .Z for step (below)
+
+	jsr optwrd		;minimum frequency
+	sty temp_min_lo
+	sta temp_min_hi
+
+	jsr optwrd		;get optional step, default is zero
+	plp			;get flags from direction
+	beq 75$			;branch if 'up' or oscillate
+	pha			;if 'down', make step 2's complement
+	tya
+	eor #$ff
+	clc
+	adc #1
+	tay
+	pla
+	eor #$ff
+	adc #0
+75$	sta temp_step_hi
+	tya
+	sta temp_step_lo
+
+	ldx #2			;get waveform. default is square (2)
+	jsr optbyt
+	cpx #4
+	bcs 97$			;illegal value
+	lda sbits+4,x		;get bit pattern for selected waveform
+	ora #1			;add in the gate bit
+	sta temp_waveform
+
+	jsr optwrd		;get optional pulse width in y,a
+	bcs 80$
+	lda #8			;no arg's given, use default pulse width
+	ldy #0
+80$	cmp #16
+	bcs 98$
+	sty temp_pulse_lo
+	sta temp_pulse_hi
+
+	lda temp_time_lo
+	ora temp_time_hi
+	beq 100$		;special case: time=0 means 'kill it NOW'
+
+; wait for all current uses of this voice to time out
+
+	ldx sound_voice		;first test 'PLAY'
+	ldy times26,x
+60$	lda voices6+1,y
+	bpl 60$
+
+70$	lda sound_time_hi6,x	;now test 'SOUND'
+	bpl 70$
+
+; all clear, now set up for current effect
+
+	ldy #0			;download max freq l&h, min freq l&h,
+90$	lda temp_max_lo,y	;..sweep direction, step value l&h, & freq l&h
+	sta sound_max_lo6,x
+	txa
+	clc
+	adc #6
+	tax
+	iny
+	cpy #9
+	bne 90$
+
+; now set up sid
+
+	ldx sound_voice
+	ldy offtab6,x		;get index to sid's voices
+	jsr put_io_in_map
+
+	lda #$08		;turn off sid's gate
+	sta sid+4,y
+	lda #0			;set up attack & decay,
+	sta sid+5,y
+	lda #$f0		;..and sustain & release
+	sta sid+6,y
+
+	ldx #0			;set up freq (l&h), pulse width (l&h), & waveform
+95$	lda temp_freq_lo,x
+	sta sid,y
+	iny
+	inx
+	cpx #5
+	bne 95$
+
+; now set up time to play
+
+100$	ldx sound_voice
+	ldy temp_time_lo
+	lda temp_time_hi
+	sei
+	sta sound_time_hi6,x
+	tya
+	sta sound_time_lo6,x
+	cli
+	rts
+
+	.page
+;*****************************************************************************
+;*  PLAY "Xn": route the current voice through its SID's filter
+;*****************************************************************************
+
+set_filter6
+	cmp #2
+	bcc 5$
+	jmp play_bad_value	;value too large
+5$	lsr a			;.C = filter on
+	php
+	ldy voice
+	ldx times26,y
+10$	lda voices6+1,x  	;wait while the voice is playing
+	bpl 10$
+	ldx fofs6,y
+	lda vbit6,y     	;get bit to change
+	ora fil6+2,x    	;set filter on
+	plp
+	bcs 20$			;skip - turn filter on
+	eor vbit6,y     	;turn off filter
+20$	sta fil6+2,x
+	lda fil6+3,x
+	sta fil6+4,x    	;save new filter-type/volume
+
+	lda sofs6,y
+	tay
+	jsr put_io_in_map
+	lda fil6,x		;set filter values
+	sta sid+21,y
+	lda fil6+1,x
+	sta sid+22,y
+	lda fil6+2,x
+	sta sid+23,y
+	lda fil6+3,x
+	sta sid+24,y
+	jmp clear_flag
+
+;*****************************************************************************
+;*  PLAY "Un": volume of the current voice's SID
+;*****************************************************************************
+
+set_volume6
+	tay			;volume level 0..9
+	ldx voice
+	lda fofs6,x
+	tax
+	lda fil6+3,x
+	and #$f0	 	;mask out old volume
+	ora voltab,y    	;add new volume
+	sta fil6+3,x    	;save for filter change
+	lda fil6+4,x    	;get current filter-type/volume
+	and #$f0
+	ora voltab,y
+	pha
+	ldy voice
+	lda sofs6,y
+	tay
+	pla
+	jsr put_io_in_map
+	sta sid+24,y   		;set new volume
+	jmp clear_flag
+
+	.page
+;*****************************************************************************
+;*  VOL a [,b]	a = SID 1 volume, b = SID 2 volume (default b = a), 0..15
+;*****************************************************************************
+
+volume6	jsr getbyt		;get 1 byte arg in .X
+	cpx #16
+	bcs 98$			;too large
+	stx z_p_temp_1
+	jsr optbyt		;optional second volume, default = first
+	cpx #16
+	bcs 98$
+	stx vol2tmp
+	ldx #0			;SID 1
+	ldy #0
+	lda z_p_temp_1
+	jsr 10$
+	ldx #5			;SID 2
+	ldy #sid2_ofs
+	lda vol2tmp
+
+10$	sta nibble
+	lda fil6+3,x		;keep PLAY's record of the volume in step
+	and #$f0
+	ora nibble
+	sta fil6+3,x
+	lda fil6+4,x
+	and #$f0
+	ora nibble
+	sta fil6+4,x
+	jsr put_io_in_map
+	sta sid+24,y
+	rts
+
+98$	jmp fcerr		;illegal value error
+
+;*****************************************************************************
+;*  end of FILTER: store the new values for SID 1 and copy the shared part
+;*  (cut-off, resonance, filter mode) to SID 2. Each SID keeps its own
+;*  voice routing and volume.
+;*****************************************************************************
+
+filter_end6
+	ldy #3
+10$	lda fltsav,y    	;resave values
+	sta fil6,y
+	dey
+	bpl 10$
+
+	lda fil6		;cut-off
+	sta fil6+5
+	lda fil6+1
+	sta fil6+6
+
+	lda fil6+2		;resonance (upper nibble)
+	and #$f0
+	sta nibble
+	lda fil6+7		;keep SID 2 routing
+	and #$0f
+	ora nibble
+	sta fil6+7
+
+	lda fil6+3		;filter mode (upper nibble)
+	and #$f0
+	sta nibble
+	lda fil6+8		;keep SID 2 volume
+	and #$0f
+	ora nibble
+	sta fil6+8
+	rts
+
+	.page
+;*****************************************************************************
+;*  initialize music stuff (both SIDs)
+;*****************************************************************************
+
+init_voices6
+	lda #<beats/4		;set beat to quarter note
+	ldy #>beats/4
+	sta ntime
+	sty ntime+1
+
+	lda #4			;set default octave
+	sta octave
+
+	lda #16			;set default tempo
+	sta tempo_rate
+
+	lda #0			;make sure all gates are off
+	sta sid+4
+	sta sid+11
+	sta sid+18
+	sta sid+sid2_ofs+4
+	sta sid+sid2_ofs+11
+	sta sid+sid2_ofs+18
+	sta irq_wrap_flag	;enable basic irq handler
+
+	ldx #9			;clear filter settings of both SIDs
+10$	sta fil6,x
+	dex
+	bpl 10$
+
+	lda #$0f		;set volume to max
+	sta fil6+3
+	sta fil6+4
+	sta fil6+8
+	sta fil6+9
+	sta sid+24
+	sta sid+sid2_ofs+24
+
+	ldy #29			;initialize music tables
+20$	lda atkmus,y
+	sta atktab,y
+	dey
+	bpl 20$
+
+	ldx #9			;initialize pulse widths
+30$	lda pwhmus,x
+	sta pulshi,x
+	dex
+	bpl 30$
+
+	lda #$ff
+	ldy #5			;turn all SOUND counters off
+40$	sta sound_time_hi6,y
+	dey
+	bpl 40$
+	ldy #11			;turn all PLAY counters off
+50$	sta voices6,y
+	dey
+	bpl 50$
+
+	ldy #5			;set default envelope (piano) for all voices
+	sty voice
+60$	ldx #0
+	jsr set_envelope_1
+	dec voice
+	bpl 60$
+	inc voice		;set default voice (0)
+	rts
+
+sid6_end
+;end

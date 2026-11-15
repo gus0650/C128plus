@@ -1,0 +1,80 @@
+name: Build C128plus core
+
+# Builds the core with Quartus Prime Lite 17.0.2 (the MiSTer standard) in the
+# same Docker image the MiSTer unstable nightlies use. Runs on pushes to main
+# that can change the core, and on demand from the Actions tab ("Run workflow").
+# The finished core is attached to the run as the "C128plus-core" artifact.
+
+on:
+  push:
+    branches: [main]
+    # changes that cannot affect the core don't start a build
+    paths-ignore:
+      - 'basic71/**'
+      - 'basic70/**'
+      - 'docs/**'
+      - '**.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Compile with Quartus Prime Lite 17.0.2
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE":/project -w /project \
+            theypsilon/quartus-lite-c5:17.0.2.docker0 \
+            /opt/intelFPGA_lite/quartus/bin/quartus_sh --flow compile C128plus.qpf
+
+      - name: Slowest timing paths
+        if: always()
+        run: |
+          if [ -f output_files/C128plus.sta.summary ]; then
+            docker run --rm \
+              -v "$GITHUB_WORKSPACE":/project -w /project \
+              theypsilon/quartus-lite-c5:17.0.2.docker0 \
+              /opt/intelFPGA_lite/quartus/bin/quartus_sta -t .github/timing_report.tcl
+          fi
+
+      - name: Name the core file
+        run: |
+          mkdir -p dist
+          cp output_files/C128plus.rbf "dist/C128plus_$(date -u +%Y%m%d).rbf"
+
+      - name: Timing summary
+        if: always()
+        run: |
+          if [ -f output_files/C128plus.sta.summary ]; then
+            echo '### Timing summary' >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            cat output_files/C128plus.sta.summary >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload core
+        uses: actions/upload-artifact@v4
+        with:
+          name: C128plus-core
+          path: dist/*.rbf
+          if-no-files-found: error
+
+      - name: Upload Quartus reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quartus-reports
+          path: output_files/*.rpt
+          if-no-files-found: ignore
