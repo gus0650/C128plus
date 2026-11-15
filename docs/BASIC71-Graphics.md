@@ -6,6 +6,9 @@ chip:
 | Command | Purpose |
 |---|---|
 | `SPRITE` | BASIC 7.0's `SPRITE`, for sprites 1–24 |
+| `MOVSPR` | BASIC 7.0's `MOVSPR`, for sprites 1–24, including automatic movement |
+| `RSPRITE()`, `RSPPOS()` | BASIC 7.0's functions, for sprites 1–24 |
+| `BUMP()` | BASIC 7.0's collision function, with values 3–6 for sprites 9–24 |
 | `SPRPTR` | choose the shape of any of the 24 sprites |
 | `PALETTE` | program the 256-colour palette, switch it on and off |
 | `RPALETTE()` | read a palette entry |
@@ -103,11 +106,72 @@ SPRDEF                    : REM draw the shape as sprite 2 in the sprite editor
 SPRPTR 10,57              : REM sprite 10 gets sprite 2's shape
 ```
 
-### Positions
+### MOVSPR
 
-`MOVSPR` only handles sprites 1–8 for now. For sprites 9–24, `POKE` the
-position registers. With *k* = *n*−9 for sprites 9–16, or *k* = *n*−17 for
-sprites 17–24:
+```
+MOVSPR n, x, y          absolute position
+MOVSPR n, +x, -y        relative: move by x and y
+MOVSPR n, d ; a         relative: move distance d at angle a
+MOVSPR n, a # s         move automatically at angle a with speed s
+```
+
+Same as BASIC 7.0's `MOVSPR`, with **n = 1–24**. Coordinates are sprite
+coordinates as in BASIC 7.0: X 0–511, Y 0–255, the visible area roughly
+X 24–343 and Y 50–249. Angles are in degrees, 0 = up, 90 = right. Speed is
+0–15; `MOVSPR n,0#0` stops the sprite.
+
+```
+MOVSPR 12,160,120       : REM sprite 12 to the middle of the screen
+MOVSPR 12,+10,+0        : REM 10 pixels to the right
+MOVSPR 20,45#3          : REM sprite 20 drifts up and to the right
+```
+
+Sprites 9–24 move exactly like sprites 1–8: BASIC 7.1 uses BASIC 7.0's own
+code for the parsing and the maths (including `SCALE`) and moves them in
+the same interrupt, at the same rate. A moving sprite only moves while it is
+switched on.
+
+Automatic movement doesn't know about the slot rule: sprites *n*, *n*+8 and
+*n*+16 that drift into each other's rows will hide one another (see above).
+Moving many sprites costs some CPU time in each interrupt, so BASIC runs a
+little slower while lots of sprites are moving.
+
+### RSPPOS
+
+```
+v = RSPPOS(n, a)
+```
+
+| `a` | Returns |
+|---|---|
+| 0 | X position (0–511) |
+| 1 | Y position (0–255) |
+| 2 | speed of the automatic movement (0–15) |
+
+```
+MOVSPR 9,RSPPOS(1,0),RSPPOS(1,1)+30   : REM sprite 9 30 pixels below sprite 1
+```
+
+### RSPRITE
+
+```
+v = RSPRITE(n, a)
+```
+
+| `a` | Returns |
+|---|---|
+| 0 | 1 if the sprite is on, 0 if off |
+| 1 | colour (1–16) |
+| 2 | 1 if behind the screen, 0 if in front |
+| 3 | 1 if double width |
+| 4 | 1 if double height |
+| 5 | 1 if multicolour |
+
+### Positions with POKE
+
+`MOVSPR` is the easy way. For machine code or very fast BASIC loops, the
+position registers of sprites 9–24 can also be written directly. With
+*k* = *n*−9 for sprites 9–16, or *k* = *n*−17 for sprites 17–24:
 
 | | Sprites 9–16 | Sprites 17–24 |
 |---|---|---|
@@ -121,8 +185,48 @@ POKE 53312,100:POKE 53313,150          : REM sprite 9 to X=100, Y=150
 POKE 53328,PEEK(53328) OR 1            : REM sprite 9: X + 256
 ```
 
-Use `MOVSPR` for sprites 1–8. BASIC rewrites their position registers from
-its own copy in every interrupt, so a `POKE` there doesn't stick.
+This doesn't work for sprites 1–8: BASIC rewrites their position registers
+from its own copy in every interrupt, so a `POKE` there doesn't stick. Use
+`MOVSPR` for those.
+
+### Collisions: BUMP and COLLISION
+
+```
+v = BUMP(t)
+```
+
+| `t` | Sprites | Collision with |
+|---|---|---|
+| 1 | 1–8 | another sprite |
+| 2 | 1–8 | the screen (text or graphics) |
+| 3 | 9–16 | another sprite |
+| 4 | 9–16 | the screen |
+| 5 | 17–24 | another sprite |
+| 6 | 17–24 | the screen |
+
+Each bit stands for one sprite of the group: bit 0 (value 1) for the first,
+bit 7 (value 128) for the last. `BUMP(3)` = 6 means sprites 10 and 11 have
+collided. The value collects every collision since the last call, and
+reading it resets it. BUMP 1–2 work exactly as in BASIC 7.0.
+
+BASIC's `COLLISION` command reacts to collisions of all 24 sprites: its
+`GOSUB` runs whenever any sprite collides. Use `BUMP(1)`–`BUMP(6)` in the
+subroutine to find out which ones:
+
+```
+10 COLLISION 1,100
+...
+100 A=BUMP(1):B=BUMP(3):C=BUMP(5)
+110 PRINT "SPRITE-SPRITE:";A;B;C:RETURN
+```
+
+A sprite only reports a collision while it is actually displayed: if it is
+skipped because it shares its slot with another sprite on the same line, it
+doesn't collide either.
+
+Don't `PEEK` `$D01E`/`$D01F` (53278/53279) yourself while using `BUMP`:
+reading them clears the collision bits of all 24 sprites, and BASIC 7.1
+then can't collect them.
 
 ## Palette
 
@@ -209,28 +313,24 @@ colour. Line 20 takes it once round the colour wheel.
 - `SPRITE` typed with BASIC 7.1 installed is stored as a BASIC 7.1 keyword.
   It reaches all 24 sprites, also after `THEN` and in direct mode. `LIST`
   shows it normally.
+- `MOVSPR`, `RSPRITE`, `RSPPOS` and `BUMP` typed with BASIC 7.1 are also
+  stored as BASIC 7.1 keywords. For sprites 1–8 they behave exactly as in
+  BASIC 7.0.
 - `PALETTE`, `RPALETTE` and `SPRPTR` are new BASIC 7.1 keywords.
 - Programs that use any of these need the C128+ with BASIC 7.1. On a normal
   C128, those lines stop with `?SYNTAX ERROR`.
-- Programs loaded from disk keep BASIC 7.0's own `SPRITE` and work as before,
-  for sprites 1–8.
+- Programs loaded from disk keep BASIC 7.0's own sprite keywords and work as
+  before, for sprites 1–8.
 - `SID6 OFF` only affects the sound keywords, not the graphics commands.
 
 ## Still limited to sprites 1–8
 
-These BASIC 7.0 commands don't know about sprites 9–24 yet:
-
 | Command | For sprites 9–24 |
 |---|---|
-| `MOVSPR` | `POKE` the position registers (see above) |
-| `SPRDEF`, `SPRSAV` | design or load the shape on sprites 1–8, then `SPRPTR` |
-| `COLLISION`, `BUMP()` | `PEEK` the collision registers 53334/53335 (`$D056`/`$D057`) and 53398/53399 (`$D096`/`$D097`), before `BUMP` or `$D01E`/`$D01F`: reading those clears all 24 bits |
-| `RSPRITE()`, `RSPPOS()` | `PEEK` the registers |
+| `SPRDEF` | design the shape on sprites 1–8, then `SPRPTR` |
+| `SPRSAV` | load the shape into sprites 1–8, then `SPRPTR` |
 
-Stage 4 of BASIC 7.1 is planned to bring `MOVSPR`, `RSPRITE`, `RSPPOS` and
-`BUMP` to all 24 sprites.
-
-## Test program
+## Test programs
 
 `basic71/test/gfxtest.prg` (source: `gfxtest.bas`, also on `gfxtest.d64`)
 goes through the commands step by step:
@@ -247,12 +347,48 @@ DLOAD "GFXTEST"
 RUN
 ```
 
-If it stops at line 30 with "VIC-IIX LOCKED", BASIC 7.1 isn't installed or
-the VIC-IIx was locked.
+`basic71/test/sprtest.prg` (source: `sprtest.bas`, also on `sprtest.d64`)
+tests sprite movement:
+
+1. `MOVSPR`: 24 solid sprites in three rows
+2. `RSPPOS(20,0)` and `RSPPOS(20,1)`: prints 130 180
+3. relative `MOVSPR`: row 3 steps to the right
+4. automatic movement: row 2 drifts right, row 3 left; `RSPPOS(9,2)` prints
+   the speed, 2
+5. `RSPRITE(9,1)`: prints sprite 9's colour, 9
+6. `BUMP`: sprite 10 is moved onto sprite 11; `BUMP(3)` prints 6
+
+```
+DLOAD "SPRTEST"
+RUN
+```
+
+If a program stops at line 30 with "VIC-IIX LOCKED", BASIC 7.1 isn't
+installed or the VIC-IIx was locked.
 
 ## Tests
 
 `basic71/test_graphics.py` boots the real Kernal and BASIC with BASIC 7.1
 in a C128 simulator, types the commands and checks the VIC-IIx registers and
 sprite pointers. It also checks the default pointers, the errors for out of
-range values and a locked chip, and `SPRPTR` with PTRSEP.
+range values and a locked chip, `SPRPTR` with PTRSEP, every form of
+`MOVSPR` for sprites 9–24 (including automatic movement and an error in the
+middle of a `MOVSPR`), `RSPPOS`, `RSPRITE`, and `BUMP` 1–6 with simulated
+collisions.
+
+## How it works
+
+- **Keywords:** BASIC 7.1 stores `MOVSPR` as `$FE $48`, and `RSPRITE`,
+  `RSPPOS` and `BUMP` as `$CE $41`–`$CE $43`.
+- **MOVSPR for sprites 9–24:** BASIC 7.1 doesn't have its own copy of
+  `MOVSPR`'s maths. It puts the sprite's position and motion record into
+  BASIC 7.0's slot for the sprite that shares its hardware slot (*n*−1
+  AND 7), holds off BASIC's interrupt, lets BASIC 7.0's `MOVSPR` code do the
+  rest, then takes the result out and puts the slot back. If `MOVSPR` stops
+  with an error, a hook on BASIC's error vector undoes the swap first.
+- **Automatic movement:** BASIC 7.1 keeps BASIC 7.0's 11-byte motion record
+  for each of sprites 9–24 and moves them with the same algorithm, once per
+  jiffy, from its hook on the Kernal's IRQ vector.
+- **Collisions:** the same hook reads `$D056`/`$D057` and `$D096`/`$D097` at
+  the start of every interrupt, before BASIC 7.0 reads `$D01E`/`$D01F`, which
+  clears all 24 bits.

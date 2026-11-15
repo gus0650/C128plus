@@ -232,8 +232,13 @@ class C128Mem:
             if r in (0x11, 0x12): s.raster = (s.raster + 1) % 312
             if r == 0x12: return s.raster & 0xFF
             if r == 0x11: return (s.vic[0x11] & 0x7F) | ((s.raster >> 1) & 0x80)
-            if r == 0x19: return s.vic_irq | (0x80 if s.vic_irq else 0) | 0x70
-            if r in (0x1E, 0x1F): return 0
+            if r == 0x19:
+                f = s.vic_irq
+                if s.vicx[0x57] | s.vicx[0x97]: f |= 2      # sprite-background collision
+                if s.vicx[0x56] | s.vicx[0x96]: f |= 4      # sprite-sprite collision
+                return f | (0x80 if f else 0) | 0x70
+            if r == 0x1E: s.vicx[0x56] = s.vicx[0x96] = 0; return 0   # clears all 24 bits
+            if r == 0x1F: s.vicx[0x57] = s.vicx[0x97] = 0; return 0
             return s.vic[r]
         if a < 0xD500: return 0
         if a < 0xD600:

@@ -359,7 +359,7 @@ def test_rpalette():
     except BasicError as e:
         assert str(e) == 'ILLEGAL QUANTITY'
     m.mem.cfg = 0; m.chained = None
-    m.call(m.syms['r_fn'], a=0x41, c=1)                             # not ours
+    m.call(m.syms['r_fn'], a=0x50, c=1)                             # not ours
     assert m.chained[0] == 'fn' and m.chained[4] == 1
 
 def test_crunch_sprite():

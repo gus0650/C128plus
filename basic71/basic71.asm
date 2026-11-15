@@ -7,6 +7,7 @@
 ;
 ;  Stage 1-3: start-up line, VIC-IIx unlock, PALETTE, RPALETTE(),
 ;              SPRITE for sprites 1-24, SPRPTR
+;  Stage 4:   MOVSPR, RSPRITE(), RSPPOS(), BUMP() for sprites 1-24
 ;  Stage 6:   six-voice sound with the second SID at $D420: SOUND, PLAY,
 ;              VOL and FILTER for voices 1-6, SID6 ON/OFF
 ;
@@ -80,6 +81,16 @@ jiffy      = $A2        ; low byte of the jiffy clock (TI)
 cinv       = $0314      ; Kernal IRQ vector
 system_vector = $0A00   ; Kernal warm start vector (RUN/STOP + RESTORE)
 
+; BASIC 7.0 sprite routines and data (318018/318019-04)
+movspr_cont = $6CC9     ; BASIC's MOVSPR after reading the sprite number
+z_p_temp_1 = $77        ; sprite number 0-7 for MOVSPR
+vic_save   = $11D6      ; BASIC's copy of $D000-$D010 (+17/+18: BUMP values)
+sprite_data = $117E     ; BASIC's motion records, 11 bytes per sprite
+irq_wrap_flag = $12FD   ; non-zero: BASIC's IRQ code does nothing
+nosflt     = $84C9      ; Y low, A high -> FAC (unsigned)
+chkcom     = $795C      ; check for ','
+ierror     = $0300      ; BASIC error vector (error number in X)
+
 ; ---- SIDs -----------------------------------------------------------------------
 sid        = $D400      ; voices 1-3
 SID2       = $20        ; offset of the second SID: voices 4-6 at $D420
@@ -106,11 +117,15 @@ TK_PLAY     = $44       ; $FE $44   when typed with SID6 ON)
 TK_VOL      = $45       ; $FE $45
 TK_FILTER   = $46       ; $FE $46
 TK_SID6     = $47       ; $FE $47
+TK_MOVSPR   = $48       ; $FE $48  (replaces BASIC's own MOVSPR when typed with BASIC 7.1)
 FN_RPALETTE = $40       ; $CE $40
+FN_RSPRITE  = $41       ; $CE $41  (replace BASIC's RSPRITE, RSPPOS, BUMP)
+FN_RSPPOS   = $42       ; $CE $42
+FN_BUMP     = $43       ; $CE $43
 CMD_FIRST   = $40
-CMD_LAST    = $47
+CMD_LAST    = $48
 FN_FIRST    = $40
-FN_LAST     = $40
+FN_LAST     = $43
 
 ; =============================================================================
 ;  ROM image: 32K. $8000 half is empty, code is in the $C000 half.
@@ -200,6 +215,7 @@ cs_copy2:   inx
             lda #1
             sta s6_on
             jsr snd_init
+            jsr spr_stop
 
             ; unlock the VIC-IIx
             lda #$A5
@@ -266,6 +282,16 @@ s_optbx:    lda #<optbyt              ; as s_optbyt, but X (the default) passes 
             sta sysvec
             lda #>optbyt
             sta sysvec+1
+            jmp syscall
+s_chkcom:   lda #<chkcom
+            ldx #>chkcom
+            jmp syscall_ax
+s_nosflt:   sta tmpa2                 ; Y low, A high -> FAC
+            lda #<nosflt
+            sta sysvec
+            lda #>nosflt
+            sta sysvec+1
+            lda tmpa2
             jmp syscall
 s_comwrd:   lda #<comwrd
             ldx #>comwrd
@@ -352,6 +378,10 @@ kwtab:      .byte "RPALETT", 'E'+$80, FN_RPALETTE, $FF
             .byte "VO",      'L'+$80, TK_VOL,      $00
             .byte "FILTE",   'R'+$80, TK_FILTER,   $00
             .byte "SID",     '6'+$80, TK_SID6,     $00
+            .byte "MOVSP",   'R'+$80, TK_MOVSPR,   $00
+            .byte "RSPRIT",  'E'+$80, FN_RSPRITE,  $FF
+            .byte "RSPPO",   'S'+$80, FN_RSPPOS,   $FF
+            .byte "BUM",     'P'+$80, FN_BUMP,     $FF
             .byte 0
 
 ; -----------------------------------------------------------------------------
@@ -380,8 +410,11 @@ ex_6:       cmp #TK_FILTER
             bne ex_7
             jmp do_filter
 ex_7:       cmp #TK_SID6
-            bne ex_bad
+            bne ex_8
             jmp do_sid6
+ex_8:       cmp #TK_MOVSPR
+            bne ex_bad
+            jmp do_movspr
 ex_bad:     jmp s_snerr
 
 ; the extensions must be unlocked before BASIC 7.1 touches $D040-$D0FF, otherwise
@@ -398,8 +431,17 @@ cu_fc:      jmp s_fcerr
 ;  txtptr after the argument (on ')'). Out: FAC = result.
 ; -----------------------------------------------------------------------------
 rom_fn:     cmp #FN_RPALETTE
-            bne ex_bad
+            bne fn_1
             jmp do_rpalette
+fn_1:       cmp #FN_RSPRITE
+            bne fn_2
+            jmp do_rsprite
+fn_2:       cmp #FN_RSPPOS
+            bne fn_3
+            jmp do_rsppos
+fn_3:       cmp #FN_BUMP
+            bne ex_bad
+            jmp do_bump
 
 ; -----------------------------------------------------------------------------
 ;  PALETTE c,hue,lum   PALETTE ON   PALETTE OFF   PALETTE RESET
@@ -1326,8 +1368,491 @@ sq_neg:     lda s_step_lo,y
             rts
 
 ; =============================================================================
+;  Stage 4: MOVSPR, RSPRITE(), RSPPOS(), BUMP() for sprites 1-24.
+;  Sprites 1-8 use BASIC 7.0's own data (vic_save, sprite_data). For sprites
+;  9-24, BASIC 7.1 keeps the same 11-byte motion record per sprite (m_data)
+;  and moves them in its IRQ hook with BASIC's algorithm. MOVSPR for 9-24
+;  lets BASIC's own MOVSPR code do the parsing and maths: the sprite's
+;  position and motion record are swapped into the BASIC slot of the sprite
+;  that shares its hardware slot (n-1 AND 7), BASIC's interrupt is held off,
+;  and afterwards everything is swapped back.
+; =============================================================================
+
+m_off:      .byte 0, 11, 22, 33, 44, 55, 66, 77, 88, 99, 110, 121, 132, 143, 154, 165
+
+; -----------------------------------------------------------------------------
+;  MOVSPR n, ...    n = 1-24, all forms of BASIC 7.0's MOVSPR
+; -----------------------------------------------------------------------------
+do_movspr:  jsr s_chrget
+            jsr s_getbyt              ; sprite number
+            dex
+            cpx #24
+            bcc mv_1
+mv_fc:      jmp s_fcerr
+mv_1:       cpx #8
+            bcs mv_ext
+            stx z_p_temp_1            ; sprites 1-8: BASIC's own MOVSPR
+            lda #<movspr_cont
+            ldx #>movspr_cont
+            jmp syscall_ax
+
+mv_ext:     stx mv_n
+            jsr chk_unlocked
+            lda mv_n
+            and #7
+            sta mv_k                  ; BASIC slot that shares the hardware slot
+            tay
+            lda bitmask,y
+            sta mv_bit
+            lda mv_n
+            sec
+            sbc #8
+            sta mv_mi                 ; 0-15: index into m_data
+            lda mv_n
+            and #$18                  ; 8-15 -> $40, 16-23 -> $80
+            asl a
+            asl a
+            asl a
+            sta mv_base
+            lda mv_k
+            asl a
+            clc
+            adc mv_base
+            sta mv_reg                ; X register offset (Y is +1)
+
+            sei
+            inc irq_wrap_flag         ; hold off BASIC's interrupt (sprite moves)
+            jsr mv_swapin
+            lda ierror                ; on an error: swap back, then BASIC's handler
+            sta old_ierror
+            lda ierror+1
+            sta old_ierror+1
+            lda #<r_moverr
+            sta ierror
+            lda #>r_moverr
+            sta ierror+1
+            lda mv_k
+            sta z_p_temp_1
+            lda #<movspr_cont         ; BASIC parses the rest and does the maths
+            ldx #>movspr_cont
+            jsr syscall_ax
+            sei
+            jsr mv_swapout
+            cli
+            rts
+
+; put sprite mv_n's position and motion record into BASIC slot mv_k
+mv_swapin:  lda mv_k                  ; save BASIC's slot
+            asl a
+            tay
+            lda vic_save,y
+            sta mv_save
+            lda vic_save+1,y
+            sta mv_save+1
+            lda vic_save+16
+            sta mv_save+2
+            ldx mv_k
+            ldy m_off,x
+            ldx #0
+ms_1:       lda sprite_data,y
+            sta mv_save+3,x
+            iny
+            inx
+            cpx #11
+            bne ms_1
+
+            lda mv_k                  ; position of sprite n
+            asl a
+            tay
+            ldx mv_reg
+            lda vic,x
+            sta vic_save,y
+            lda vic+1,x
+            sta vic_save+1,y
+            lda vic_save+16
+            ora mv_bit
+            eor mv_bit
+            sta mv_tmp
+            ldx mv_base
+            lda vic+$10,x
+            and mv_bit
+            ora mv_tmp
+            sta vic_save+16
+
+            ldx mv_mi                 ; motion record of sprite n
+            lda m_off,x
+            tax
+            ldy mv_k
+            lda m_off,y
+            tay
+            lda #11
+            sta mv_tmp
+ms_2:       lda m_data,x
+            sta sprite_data,y
+            inx
+            iny
+            dec mv_tmp
+            bne ms_2
+            lda #1
+            sta mv_active
+            rts
+
+; take sprite mv_n's new state out of BASIC slot mv_k, restore the slot,
+; the error vector and BASIC's interrupt
+mv_swapout: lda mv_active
+            bne mo_0
+            rts
+mo_0:       lda mv_k
+            asl a
+            tay
+            ldx mv_reg
+            lda vic_save,y
+            sta vic,x
+            lda vic_save+1,y
+            sta vic+1,x
+            ldx mv_base
+            lda vic+$10,x
+            ora mv_bit
+            eor mv_bit
+            sta mv_tmp
+            lda vic_save+16
+            and mv_bit
+            ora mv_tmp
+            sta vic+$10,x
+
+            ldy mv_mi
+            lda m_off,y
+            tay
+            ldx mv_k
+            lda m_off,x
+            tax
+            lda #11
+            sta mv_tmp
+mo_1:       lda sprite_data,x
+            sta m_data,y
+            inx
+            iny
+            dec mv_tmp
+            bne mo_1
+
+            lda mv_k                  ; BASIC's slot back
+            asl a
+            tay
+            lda mv_save
+            sta vic_save,y
+            lda mv_save+1
+            sta vic_save+1,y
+            lda mv_save+2
+            sta vic_save+16
+            ldx mv_k
+            ldy m_off,x
+            ldx #0
+mo_2:       lda mv_save+3,x
+            sta sprite_data,y
+            iny
+            inx
+            cpx #11
+            bne mo_2
+
+            lda old_ierror
+            sta ierror
+            lda old_ierror+1
+            sta ierror+1
+            dec irq_wrap_flag
+            lda #0
+            sta mv_active
+            rts
+
+; -----------------------------------------------------------------------------
+;  RSPPOS(n, a)   n = 1-24; a = 0 X position, 1 Y position, 2 speed
+; -----------------------------------------------------------------------------
+do_rsppos:  jsr s_conint              ; sprite number (pre-evaluated)
+            dex
+            cpx #24
+            bcs rp_fc
+            stx fn_n
+            jsr s_chkcom
+            jsr s_getbyt
+            stx fn_a
+            jsr s_chkcls
+            ldx fn_a
+            cpx #3
+            bcs rp_fc
+            ldx fn_n
+            txa
+            and #7
+            tay
+            lda bitmask,y
+            sta fn_bit
+            cpx #8
+            bcs rp_ext
+            lda mv_active             ; sprite 1-8 whose slot holds a sprite
+            beq rp_basic              ; being moved by MOVSPR right now?
+            cpx mv_k
+            bne rp_basic
+            lda mv_save               ; ... then its own values are saved here
+            sta fn_x
+            lda mv_save+1
+            sta fn_y
+            lda mv_save+2
+            sta fn_msb
+            lda mv_save+3
+            sta fn_spd
+            jmp rp_out
+rp_basic:   txa                       ; sprites 1-8: BASIC's copies
+            asl a
+            tay
+            sei
+            lda vic_save,y
+            sta fn_x
+            lda vic_save+1,y
+            sta fn_y
+            lda vic_save+16
+            sta fn_msb
+            cli
+            ldy m_off,x
+            lda sprite_data,y
+            sta fn_spd
+            jmp rp_out
+rp_fc:      jmp s_fcerr
+rp_ext:     jsr chk_unlocked          ; sprites 9-24: the registers
+            txa
+            and #$18
+            asl a
+            asl a
+            asl a
+            sta fn_base
+            txa
+            and #7
+            asl a
+            clc
+            adc fn_base
+            tay
+            sei
+            lda vic,y
+            sta fn_x
+            lda vic+1,y
+            sta fn_y
+            ldy fn_base
+            lda vic+$10,y
+            sta fn_msb
+            cli
+            txa
+            sec
+            sbc #8
+            tay
+            lda m_off,y
+            tay
+            lda m_data,y
+            sta fn_spd
+rp_out:     lda fn_a
+            beq rp_x
+            cmp #1
+            beq rp_y
+            ldy fn_spd                ; speed
+            jmp s_sngflt
+rp_y:       ldy fn_y
+            jmp s_sngflt
+rp_x:       lda fn_msb
+            and fn_bit
+            beq rp_x1
+            lda #1
+rp_x1:      ldy fn_x
+            jmp s_nosflt              ; Y low, A high
+
+; -----------------------------------------------------------------------------
+;  RSPRITE(n, a)   n = 1-24; a = 0 on, 1 colour, 2 priority, 3 x-expand,
+;                  4 y-expand, 5 multicolour
+; -----------------------------------------------------------------------------
+do_rsprite: jsr s_conint
+            dex
+            cpx #24
+            bcc rs_n
+rs_fc:      jmp s_fcerr
+rs_n:
+            stx fn_n
+            jsr s_chkcom
+            jsr s_getbyt
+            stx fn_a
+            jsr s_chkcls
+            ldx fn_a
+            cpx #6
+            bcs rs_fc
+            lda fn_n
+            cmp #8
+            bcc rs_1
+            jsr chk_unlocked
+rs_1:       lda fn_n
+            and #7
+            sta fn_bit                ; sprite within its group (0-7)
+            lda fn_n
+            lsr a
+            lsr a
+            lsr a                     ; group 0-2
+            sta fn_base
+            asl a                     ; group * 6 -> sprregs
+            adc fn_base
+            asl a
+            adc fn_a
+            tay
+            lda sprregs,y             ; register of this attribute
+            ldx fn_a
+            cpx #1
+            bne rs_bit
+            clc                       ; colour: register + sprite, 1-16
+            adc fn_bit
+            tax
+            lda vic,x
+            and #$0F
+            tay
+            iny
+            jmp s_sngflt
+rs_bit:     tax
+            ldy fn_bit
+            lda bitmask,y
+            and vic,x
+            beq rs_0
+            lda #1
+rs_0:       tay
+            jmp s_sngflt
+
+; -----------------------------------------------------------------------------
+;  BUMP(n)   1/2: sprites 1-8 (BASIC 7.0), 3/4: sprites 9-16, 5/6: sprites
+;  17-24; odd = sprite-sprite, even = sprite-background. Bit k = k-th sprite
+;  of the group. Reading resets the value.
+; -----------------------------------------------------------------------------
+do_bump:    jsr s_chkcls
+            jsr s_conint
+            dex
+            cpx #6
+            bcc bp_n
+            jmp s_fcerr
+bp_n:
+            cpx #2
+            bcs bp_ext
+            sei                       ; sprites 1-8: collected by BASIC
+            ldy vic_save+17,x
+            lda #0
+            sta vic_save+17,x
+            cli
+            jmp s_sngflt
+bp_ext:     sei                       ; sprites 9-24: collected by r_irq
+            ldy col9-2,x
+            lda #0
+            sta col9-2,x
+            cli
+            jmp s_sngflt
+
+; -----------------------------------------------------------------------------
+;  Once per jiffy (from r_irq): move sprites 9-24 that have a speed set,
+;  with BASIC 7.0's algorithm (see BASIC's IRQ code).
+; -----------------------------------------------------------------------------
+spr_irq:    lda vicx_key
+            cmp #$FE
+            bne sm_rts
+            ldy #15
+sm_next:    sty sm_i
+            tya
+            and #7
+            tax
+            lda bitmask,x
+            sta sm_bit
+            tya
+            and #8                    ; 0-7 -> $40, 8-15 -> $80
+            asl a
+            asl a
+            asl a
+            clc
+            adc #$40
+            sta sm_base
+            tax
+            lda vic+$11,x             ; enabled?
+            and sm_bit
+            beq sm_skip
+            ldx sm_i
+            lda m_off,x
+            tax
+            lda m_data,x              ; speed
+            beq sm_skip
+            sta m_data+1,x            ; step counter
+            lda sm_i
+            and #7
+            asl a
+            adc sm_base
+            tay                       ; X register offset
+sm_loop:    lda m_data+2,x            ; angle sign
+            sec
+            sbc #1                    ; cosine for Y
+            inx
+            inx
+            iny
+            jsr sm_sub                ; Y position
+            dex
+            dex
+            dey
+            lda m_data+2,x
+            jsr sm_sub                ; X position
+            bcc sm_nc
+            sty sm_y                  ; X wrapped: flip bit 8
+            ldy sm_base
+            lda vic+$10,y
+            eor sm_bit
+            sta vic+$10,y
+            ldy sm_y
+sm_nc:      dec m_data+1,x
+            bne sm_loop
+sm_skip:    ldy sm_i
+            dey
+            bpl sm_next
+sm_rts:     rts
+
+sm_sub:     pha
+            clc
+            lda m_data+3,x
+            adc m_data+7,x
+            sta m_data+7,x
+            lda m_data+4,x
+            adc m_data+8,x
+            sta m_data+8,x
+            pla
+            bcc sm_s3                 ; no step this time
+            lsr a
+            lsr a                     ; C = direction
+            lda vic,y
+            bcs sm_s1
+            adc #1
+            jmp sm_s2
+sm_s1:      sbc #1
+            cmp #$FF                  ; C = 1 on underflow
+sm_s2:      sta vic,y
+sm_s3:      rts
+
+; stop sprites 9-24 (start-up, RUN/STOP + RESTORE)
+spr_stop:   lda #0
+            ldx #175
+ss_1:       sta m_data,x
+            dex
+            bne ss_1
+            sta m_data
+            ldx #3
+ss_2:       sta col9,x
+            dex
+            bpl ss_2
+            sta mv_active
+            rts
+
+; jiffy tick: sound, then sprite movement
+tick:       jsr snd_irq
+            jmp spr_irq
+
+; =============================================================================
 ;  RAM part, copied to $1800 at start-up (max. 1K)
 ; =============================================================================
+code_end:
+            .assert code_end <= $D000, "code runs into the I/O area at $D000"
+
+; The RAM part is stored at $E000 ($D000-$DFFF is hidden by I/O).
+            .org $E000
 ramimage:
             .rorg $1800
 
@@ -1473,10 +1998,10 @@ rf_pass:    sec
             jmp (old_fn)
 
 ; --- keyword names for LIST (must be in RAM 0) ---------------------------------
-cmdname_lo: .byte <nm_palette, <nm_sprite, <nm_sprptr, <nm_sound, <nm_play, <nm_vol, <nm_filter, <nm_sid6
-cmdname_hi: .byte >nm_palette, >nm_sprite, >nm_sprptr, >nm_sound, >nm_play, >nm_vol, >nm_filter, >nm_sid6
-fnname_lo:  .byte <nm_rpalette
-fnname_hi:  .byte >nm_rpalette
+cmdname_lo: .byte <nm_palette, <nm_sprite, <nm_sprptr, <nm_sound, <nm_play, <nm_vol, <nm_filter, <nm_sid6, <nm_movspr
+cmdname_hi: .byte >nm_palette, >nm_sprite, >nm_sprptr, >nm_sound, >nm_play, >nm_vol, >nm_filter, >nm_sid6, >nm_movspr
+fnname_lo:  .byte <nm_rpalette, <nm_rsprite, <nm_rsppos, <nm_bump
+fnname_hi:  .byte >nm_rpalette, >nm_rsprite, >nm_rsppos, >nm_bump
 nm_palette: .byte "PALETT", 'E'+$80
 nm_rpalette: .byte "RPALETT", 'E'+$80
 nm_sprite:  .byte "SPRIT", 'E'+$80
@@ -1486,12 +2011,31 @@ nm_play:    .byte "PLA", 'Y'+$80
 nm_vol:     .byte "VO", 'L'+$80
 nm_filter:  .byte "FILTE", 'R'+$80
 nm_sid6:    .byte "SID", '6'+$80
+nm_movspr:  .byte "MOVSP", 'R'+$80
+nm_rsprite: .byte "RSPRIT", 'E'+$80
+nm_rsppos:  .byte "RSPPO", 'S'+$80
+nm_bump:    .byte "BUM", 'P'+$80
 
 ; --- six-voice sound: IRQ hook ---------------------------------------------------
 ; Runs before the Kernal's IRQ handler (normal memory map). The music is
 ; advanced once per jiffy clock tick, so it keeps BASIC's 60/50 Hz rate even
 ; when the screen editor uses extra raster interrupts for split screens.
-r_irq:      lda jiffy
+r_irq:      lda vicx_key              ; collisions of sprites 9-24: collect them
+            cmp #$FE                  ; before BASIC reads $D01E/$D01F, which
+            bne ri_tick               ; clears all 24 bits
+            lda $D056
+            ora col9
+            sta col9
+            lda $D057
+            ora col9+1
+            sta col9+1
+            lda $D096
+            ora col9+2
+            sta col9+2
+            lda $D097
+            ora col9+3
+            sta col9+3
+ri_tick:    lda jiffy
             cmp lastjif
             beq ri_out
             sta lastjif
@@ -1502,7 +2046,7 @@ r_irq:      lda jiffy
             pha
             lda #CFG_71
             sta mmucr
-            jsr snd_irq
+            jsr tick
             pla
             sta mmucr
             dec irqbusy
@@ -1523,11 +2067,30 @@ r_warm:     sei
             lda #CFG_71
             sta mmucr
             jsr snd_init
+            jsr spr_stop
             lda #CFG_SYS
             sta mmucr
             jmp (old_sysvec)
 
+; --- error during MOVSPR for sprites 9-24: undo the swap, then BASIC's handler ---
+r_moverr:   stx mv_errx
+            php
+            sei
+            lda mmucr
+            pha
+            lda #CFG_71
+            sta mmucr
+            jsr mv_swapout            ; also puts BASIC's error vector back
+            pla
+            sta mmucr
+            plp
+            ldx mv_errx
+            jmp (ierror)
+
 ; --- variables -----------------------------------------------------------------
+; Vectors used with JMP (ind) must not start at $xxFF (the 6502 would read
+; the high byte from $xx00), so they start on an even address.
+            .fill * & 1, 0
 old_clk:    .word 0
 old_lst:    .word 0
 old_exe:    .word 0
@@ -1549,6 +2112,7 @@ spr_reg:    .byte 0
 spr_blk:    .byte 0
 
 ; six-voice sound
+            .fill * & 1, 0
 old_irq:    .word 0
 old_sysvec: .word 0
 lastjif:    .byte 0
@@ -1592,13 +2156,47 @@ s_time_lo:  .fill 6, 0
 s_time_hi:  .fill 6, $FF
 m_voices:   .fill 12, $FF             ; PLAY note counters, 2 per voice
 m_wave:     .fill 6, 0                ; PLAY waveform per voice
+; sprites 9-24 (stage 4)
+m_data:     .fill 176, 0              ; motion records, 11 bytes per sprite (as BASIC)
+mv_save:    .fill 14, 0               ; BASIC slot saved during MOVSPR 9-24
+mv_n:       .byte 0
+mv_k:       .byte 0
+mv_bit:     .byte 0
+mv_mi:      .byte 0
+mv_base:    .byte 0
+mv_reg:     .byte 0
+mv_tmp:     .byte 0
+mv_active:  .byte 0
+mv_errx:    .byte 0
+old_ierror: .word 0
+col9:       .fill 4, 0                ; BUMP 3-6: collisions of sprites 9-24
+fn_n:       .byte 0
+fn_a:       .byte 0
+fn_bit:     .byte 0
+fn_base:    .byte 0
+fn_x:       .byte 0
+fn_y:       .byte 0
+fn_msb:     .byte 0
+fn_spd:     .byte 0
+sm_i:       .byte 0
+sm_bit:     .byte 0
+sm_base:    .byte 0
+sm_y:       .byte 0
+tmpa2:      .byte 0
 fil6:       .fill 10, 0               ; filter/volume, 5 bytes per SID:
                                       ; +0/+1 cut-off, +2 resonance/routing,
                                       ; +3 type/volume, +4 current type/volume
 ram_end:
+            .assert (old_clk & $FF) != $FF, "vector old_clk at $xxFF"
+            .assert (old_lst & $FF) != $FF, "vector old_lst at $xxFF"
+            .assert (old_exe & $FF) != $FF, "vector old_exe at $xxFF"
+            .assert (old_fn & $FF) != $FF, "vector old_fn at $xxFF"
+            .assert (sysvec & $FF) != $FF, "vector sysvec at $xxFF"
+            .assert (old_irq & $FF) != $FF, "vector old_irq at $xxFF"
+            .assert (old_sysvec & $FF) != $FF, "vector old_sysvec at $xxFF"
             .assert ram_end <= $1B80, "RAM part overlaps the six-voice sound tables at $1B80"
             .rend
-            .assert * < $D000, "code runs into the I/O area at $D000"
+            .assert * < $FF05, "RAM image runs into the interrupt code at $FF05"
 
 ; =============================================================================
 ;  Interrupt code, byte-identical to the Kernal at $FF05-$FF41.
