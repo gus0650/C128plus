@@ -1,4 +1,4 @@
-# C128+ core for [MiSTer](https://github.com/MiSTer-devel/Main_MiSTer/wiki)
+# C128+ core for [MiSTer FPGA](https://github.com/MiSTer-devel/Main_MiSTer/wiki)
 
 The C128+ is a (rumored) prototype home computer developed by Commodore in 1986. It was never released as a finished product.
 
