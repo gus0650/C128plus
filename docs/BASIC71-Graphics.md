@@ -92,7 +92,6 @@ So sprites 1, 9 and 17 share one shape until you change it.
 `SPRPTR` writes the pointer where the VIC-IIx reads it:
 
 - normally: after the 1000 bytes of the text screen
-- in WIDE mode: at the end of the 2K screen map
 - with PTRSEP on: in the sprite pointer page
 
 It only supports RAM bank 0.

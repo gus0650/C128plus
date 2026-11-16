@@ -25,9 +25,8 @@
 --   * Programmable palette: the 16 colour indices map to 8-bit hue/luminance
 --     values (256 colours) when PALEN is set.
 --   * Hardware scrolling: programmable screen start address and row length,
---     an optional 2K "wide" screen/colour map, and a separately placeable
---     sprite pointer table. Start, row length and wide mode are latched at
---     the start of each frame.
+--     and a separately placeable sprite pointer table. Start and row length
+--     are latched at the start of each frame.
 --   * Extension register banks at $D040-$D07F and $D080-$D0BF (see the
 --     register list in writeRegisters).
 --   While locked the chip behaves exactly like a stock VIC-IIe and the
@@ -88,8 +87,6 @@ entity video_vicii_656x is
 		-- C128plus extended palette output: hue & luminance, valid when extColorEn = '1'
 		extColor   : out unsigned(7 downto 0);
 		extColorEn : out std_logic;
-		-- C128plus wide map: the VIC drives colour RAM A10 from its own address bus
-		wideMap    : out std_logic;
 	   invertV : out std_logic;  -- YUV V-component inversion side-effect (VIC-IIe only)
 
 		-- VIC-IIe only I/O pins
@@ -229,7 +226,7 @@ architecture rtl of video_vicii_656x is
 	signal vicAddrLoc : unsigned(13 downto 0);
 
 -- Address counters
-	signal ColCounter: unsigned(10 downto 0) := (others => '0'); -- VC (C128plus: 11 bits for the wide map)
+	signal ColCounter: unsigned(10 downto 0) := (others => '0'); -- VC (C128plus: only bits 9..0 address memory)
 	signal ColRestart: unsigned(10 downto 0) := (others => '0'); -- VCBASE
 	signal RowCounter: unsigned(2 downto 0) := (others => '0');
 
@@ -351,12 +348,10 @@ architecture rtl of video_vicii_656x is
 	signal SCRSTART : unsigned(10 downto 0) := (others => '0'); -- screen start offset
 	signal SCRSTART_HI : unsigned(2 downto 0) := (others => '0'); -- high bits written to $D072, applied with $D071
 	signal ROWLEN : unsigned(7 downto 0) := (others => '0');    -- row length in characters (<40 = 40)
-	signal WIDE : std_logic := '0';                             -- 2K screen and colour map
 	signal PTRSEP : std_logic := '0';                           -- sprite pointers in their own page
 	signal PTRPAGE : unsigned(5 downto 0) := (others => '0');   -- sprite pointer page (address bits 13..8)
 	-- ... and the values in use, latched at the start of each frame
 	signal activeStride : unsigned(7 downto 0) := to_unsigned(40, 8);
-	signal activeWide : std_logic := '0';
 	signal blankLoc : std_logic;
 
 	constant DEFAULT_PALETTE : paletteDef := (
@@ -419,7 +414,6 @@ begin
 	colorIndex <= colorIndexLoc;
 	extColor   <= (others => '0') when blankLoc = '1' else palette(to_integer(colorIndexLoc));
 	extColorEn <= PALEN;
-	wideMap    <= activeWide;
 
 -- -----------------------------------------------------------------------
 -- VIC-IIe turbo mode and test mode
@@ -612,7 +606,7 @@ vicStateMachine: process(clk)
 -- -----------------------------------------------------------------------
 	process(phi, vicCycle, sprite, shiftChars, idle,
 			VM, CB, ECM, BMM, nextChar, colCounter, rowCounter, MPtr, MCnt,
-			MDMA_next, refreshCounter, own, activeWide, PTRSEP, PTRPAGE, unlocked)
+			MDMA_next, refreshCounter, own, PTRSEP, PTRPAGE, unlocked)
 	begin
 		--
 		-- Default case ($3FFF fetches)
@@ -642,12 +636,9 @@ vicStateMachine: process(clk)
 				end if;
 			else
 				-- p-access: sprite n at $3F8+n, C128plus sprite n+8 at $3F0+n, sprite n+16 at $3E8+n.
-				-- C128plus: in the wide map these offsets are $7F8/$7F0/$7E8; with PTRSEP they
-				-- are $F8/$F0/$E8 in the page selected by PTRPAGE.
+				-- C128plus: with PTRSEP they are $F8/$F0/$E8 in the page selected by PTRPAGE.
 				if unlocked = '1' and PTRSEP = '1' then
 					vicAddrLoc <= PTRPAGE & "111" & (not own(to_integer(sprite))) & sprite;
-				elsif activeWide = '1' then
-					vicAddrLoc <= VM(13 downto 11) & "111111" & (not own(to_integer(sprite))) & sprite;
 				else
 					vicAddrLoc <= VM & "11111" & (not own(to_integer(sprite))) & sprite;
 				end if;
@@ -661,11 +652,7 @@ vicStateMachine: process(clk)
 				vicAddrLoc(10 downto 9) <= "00";
 			end if;
 			if phi = '1' then
-				if activeWide = '1' then
-					vicAddrLoc <= VM(13 downto 11) & colCounter;
-				else
-					vicAddrLoc <= VM & colCounter(9 downto 0);
-				end if;
+				vicAddrLoc <= VM & colCounter(9 downto 0);
 			end if;
 		end case;
 	end process;
@@ -967,7 +954,6 @@ vicStateMachine: process(clk)
 					-- are latched here so a frame is never drawn with half-updated values.
 					if unlocked = '1' then
 						colRestart <= SCRSTART;
-						activeWide <= WIDE;
 						if ROWLEN < 40 then
 							activeStride <= to_unsigned(40, 8);
 						else
@@ -975,7 +961,6 @@ vicStateMachine: process(clk)
 						end if;
 					else
 						colRestart <= (others => '0');
-						activeWide <= '0';
 						activeStride <= to_unsigned(40, 8);
 					end if;
 				end if;
@@ -1850,7 +1835,6 @@ writeRegisters: process(clk)
 				SCRSTART <= (others => '0');
 				SCRSTART_HI <= (others => '0');
 				ROWLEN <= (others => '0');
-				WIDE <= '0';
 				PTRSEP <= '0';
 				PTRPAGE <= (others => '0');
 				rasterCmp <= (others => '0');
@@ -2024,10 +2008,9 @@ writeRegisters: process(clk)
 					--   $D070        bit 0: PALEN, use programmable palette
 					--   $D071        screen start offset, bits 7..0; writing it also applies
 					--                the bits held in $D072             (latched at frame start)
-					--   $D072        screen start offset, bits 10..8; held until $D071 is written
+					--   $D072        screen start offset, bits 9..8; held until $D071 is written
 					--   $D073        row length in characters, <40 = 40 (latched at frame start)
-					--   $D074        bit 0: WIDE, 2K screen/colour map  (latched at frame start)
-					--                bit 1: PTRSEP, sprite pointers in the PTRPAGE page
+					--   $D074        bit 1: PTRSEP, sprite pointers in the PTRPAGE page
 					--   $D075        PTRPAGE: sprite pointer page, VIC address bits 13..8
 					--   $D080-$D09F  sprite 16..23, same layout as $D040-$D05F
 					if ext_r = '1' and extSel_r = "01" then
@@ -2052,13 +2035,11 @@ writeRegisters: process(clk)
 							when "010101" => MXE(15 downto 8) <= di_r;
 							when "110000" => PALEN <= di_r(0);
 							-- the high byte is held until the low byte is written, so the
-							-- 11-bit start offset always changes in one step
+							-- 10-bit start offset always changes in one step
 							when "110001" => SCRSTART <= SCRSTART_HI & di_r;
-							when "110010" => SCRSTART_HI <= di_r(2 downto 0);
+							when "110010" => SCRSTART_HI <= '0' & di_r(1 downto 0);
 							when "110011" => ROWLEN <= di_r;
-							when "110100" =>
-								WIDE <= di_r(0);
-								PTRSEP <= di_r(1);
+							when "110100" => PTRSEP <= di_r(1);
 							when "110101" => PTRPAGE <= di_r(5 downto 0);
 							when others =>
 								if addr2_r(5 downto 4) = "10" then
@@ -2157,7 +2138,7 @@ readRegisters: process(clk)
 						when "110001" => do <= SCRSTART(7 downto 0);
 						when "110010" => do <= "11111" & SCRSTART_HI;
 						when "110011" => do <= ROWLEN;
-						when "110100" => do <= "111111" & PTRSEP & WIDE;
+						when "110100" => do <= "111111" & PTRSEP & '1';
 						when "110101" => do <= "11" & PTRPAGE;
 						when "100000" | "100001" | "100010" | "100011" | "100100" | "100101" | "100110" | "100111" |
 						     "101000" | "101001" | "101010" | "101011" | "101100" | "101101" | "101110" | "101111" =>

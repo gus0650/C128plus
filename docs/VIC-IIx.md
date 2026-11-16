@@ -31,9 +31,9 @@ Once unlocked, `$D040–$D07F` and `$D080–$D0BF` are extension register banks,
 | `$D060–$D06F` | Palette entry 0–15: hue in bits 7–4, luminance in bits 3–0 |
 | `$D070` | Bit 0 = PALEN: 1 = use the programmable palette |
 | `$D071` | Screen start offset, bits 7–0. Writing it also applies the bits held in `$D072` (applied at the next frame) |
-| `$D072` | Screen start offset, bits 10–8. Held until `$D071` is written |
+| `$D072` | Screen start offset, bits 9–8. Held until `$D071` is written |
 | `$D073` | Row length in characters; values below 40 mean 40 (applied at the next frame) |
-| `$D074` | Bit 0 = WIDE: 2K screen and colour map (applied at the next frame). Bit 1 = PTRSEP: sprite pointers in their own page |
+| `$D074` | Bit 1 = PTRSEP: sprite pointers in their own page. Bit 0 is unused and reads 1 |
 | `$D075` | PTRPAGE: page for the sprite pointers, VIC address bits 13–8 (bits 5–0) |
 | `$D076–$D07F` | Unused, read `$FF` |
 | `$D080–$D08F` | Sprite 16–23 X/Y position |
@@ -84,22 +84,13 @@ On a stock VIC-II, the CPU has to copy 1000 bytes of screen and 1000 bytes of co
 
 ### Screen start offset (`$D071`/`$D072`)
 
-The display starts this many characters into screen memory, instead of at the beginning. The offset is 11 bits wide and is split over two registers. **Write `$D072` (high bits) first, then `$D071` (low byte).** The high bits are held until the low byte is written, and then both change together, so a frame never sees half an update. The same offset applies to colour RAM, so colours move with the characters. Screen memory is treated as a ring: in normal mode it is 1024 characters and wraps from `$3FF` back to `$000`; in wide mode it is 2048 characters.
+The display starts this many characters into screen memory, instead of at the beginning. The offset is 10 bits wide (0–1023) and is split over two registers. **Write `$D072` (high bits) first, then `$D071` (low byte).** The high bits are held until the low byte is written, and then both change together, so a frame never sees half an update. The same offset applies to colour RAM, so colours move with the characters. Screen memory is treated as a ring of 1024 characters: it wraps from `$3FF` back to `$000`.
 
 To scroll up one character row, add the row length (normally 40) to the offset and write the one new row that comes into view at the bottom.
 
 ### Row length (`$D073`)
 
-This sets the distance in memory from one screen row to the next. With a row length of 64, for example, the 40 visible columns are a window onto a map 64 characters wide. Adding 1 to the start offset scrolls one character sideways.
-
-### Wide map (`$D074` bit 0)
-
-A normal map of 1024 characters is too small for rows longer than 40 characters. In wide mode, screen memory and colour RAM are both 2048 characters, enough for 80 × 25. The C128 has 2K of colour RAM fitted, and in wide mode the VIC uses both halves.
-
-- **Alignment:** the screen must start on a 2K boundary. Bit 4 of `$D018` is ignored, so a screen set at `$0400` is used from `$0000`. Use for example `$2000` (VIC bank 0) or `$2800`.
-- **Colour RAM from the CPU:** colour RAM still appears at `$D800–$DBFF`. Bit 0 of `$01` selects which half the CPU sees: 1 = map positions 0–1023, 0 = positions 1024–2047. This works in C128 mode only; in C64 mode the CPU can reach only the first half, so the wide map is of little use there.
-- **Sprite pointers** move to the end of the 2K map: screen + `$7E8`…`$7FF`.
-- Wide mode is for the text modes. Bitmap modes still use a 1K map.
+This sets the distance in memory from one screen row to the next. With a row length of 64, for example, the 40 visible columns are a window onto a map 64 characters wide. Adding 1 to the start offset scrolls one character sideways. The ring is still 1024 characters, so longer rows mean fewer rows in memory: with 64 characters per row it holds 16 rows, and the display wraps round to the top of the ring after them. To scroll further, write the new rows as they come into view.
 
 ### Sprite pointer page (`$D074` bit 1, `$D075`)
 
@@ -113,7 +104,7 @@ When the display scrolls through the whole ring, the sprite pointer bytes at the
 
 ### Applied at the start of each frame
 
-The start offset, row length and WIDE are copied into the VIC at the start of each frame. A program can update them at any time during a frame, and the next frame is drawn entirely with the new values, without tearing. PTRSEP and PTRPAGE take effect immediately.
+The start offset and row length are copied into the VIC at the start of each frame. A program can update them at any time during a frame, and the next frame is drawn entirely with the new values, without tearing. PTRSEP and PTRPAGE take effect immediately.
 
 The C128 screen editor knows nothing about these registers. It still assumes a 40 × 25 screen starting at its normal address. Hardware scrolling is meant for programs that run their own display, such as games and demos.
 

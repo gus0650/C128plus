@@ -104,7 +104,7 @@ vic        = $D000
 vicx_key   = $D03F      ; reads $FE while the extensions are unlocked
 vicx_pal   = $D060
 vicx_palen = $D070
-vicx_ctrl  = $D074      ; bit 0 WIDE, bit 1 PTRSEP
+vicx_ctrl  = $D074      ; bit 1 PTRSEP
 vicx_ppage = $D075      ; sprite pointer page
 cia2_pra   = $DD00      ; VIC bank (bits 1-0, inverted)
 
@@ -637,8 +637,8 @@ bitmask:    .byte $01, $02, $04, $08, $10, $20, $40, $80
 ; -----------------------------------------------------------------------------
 ;  SPRPTR n,block - choose the 64-byte shape block (0-255) of sprite n (1-24)
 ;  The pointer is written where the VIC-IIx fetches it: after the screen
-;  (screen + $3F8/$3F0/$3E8), at the end of the 2K map in wide mode, or in the
-;  pointer page when PTRSEP is set. RAM bank 0 only.
+;  (screen + $3F8/$3F0/$3E8), or in the pointer page when PTRSEP is set.
+;  RAM bank 0 only.
 ; -----------------------------------------------------------------------------
 do_sprptr:  jsr spr_number
             stx tmpc                  ; group
@@ -664,18 +664,9 @@ do_sprptr:  jsr spr_number
             bne pp_screen             ; locked: always after the screen
             lda vicx_ctrl
             and #$02
-            beq pp_wide
+            beq pp_screen
             lda vicx_ppage            ; PTRSEP: own page
             and #$3F
-            jmp pp_bank
-pp_wide:    lda vicx_ctrl
-            and #$01
-            beq pp_screen
-            lda vic+$18               ; WIDE: (VM & $E) * 4 + 7  -> $x7F8
-            lsr a
-            lsr a
-            and #$38
-            ora #$07
             jmp pp_bank
 pp_screen:  lda vic+$18               ; VM * 4 + 3  -> screen + $3F8
             lsr a

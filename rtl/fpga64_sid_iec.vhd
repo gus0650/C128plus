@@ -359,7 +359,6 @@ signal cpuBank      : unsigned(1 downto 0);
 signal vicBank      : unsigned(1 downto 0);
 signal colorA10     : std_logic;
 signal colorAddr10  : std_logic;
-signal vicWideMap   : std_logic;
 signal mmu_exrom    : std_logic;
 signal mmu_game     : std_logic;
 signal mmu_c128_n   : std_logic;
@@ -742,7 +741,6 @@ port map (
    colorIndex => vicColorIndex,
    extColor => vicExtColor,
    extColorEn => vicExtColorEn,
-   wideMap => vicWideMap,
    invertV => vicInvertV,
 
    irq_n => irq_vic
@@ -750,9 +748,7 @@ port map (
 
 vicHsync <= vicHS;
 
--- C128plus: in the VIC's 2K wide map, colour RAM A10 follows the VIC address
--- (both 1K banks form one map); otherwise it comes from the processor port.
-colorAddr10 <= systemAddr(10) when vicWideMap = '1' and cpuHasBus = '0' else colorA10;
+colorAddr10 <= colorA10;
 
 vicColors: entity work.fpga64_rgbcolor
 port map (
