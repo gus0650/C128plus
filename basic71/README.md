@@ -14,10 +14,10 @@ BASIC 7.1 is being built in stages:
 
 | Stage | Contents | Status |
 |---|---|---|
-| 1 | ROM detected at power-up, VIC-IIx unlocked, start-up line | done, to be tested on MiSTer |
-| 2 | `PALETTE`, `RPALETTE()` | done, to be tested on MiSTer |
-| 3 | `SPRITE`, `SPRPTR` for sprites 1–24 | done, to be tested on MiSTer |
-| 4 | `MOVSPR` with automatic movement for all 24 sprites, `RSPRITE`, `RSPPOS`, `BUMP` | done, to be tested on MiSTer |
+| 1 | ROM detected at power-up, VIC-IIx unlocked, start-up line | done, tested on MiSTer |
+| 2 | `PALETTE`, `RPALETTE()` | done, tested on MiSTer |
+| 3 | `SPRITE`, `SPRPTR` for sprites 1–24 | done, tested on MiSTer |
+| 4 | `MOVSPR` with automatic movement for all 24 sprites, `RSPRITE`, `RSPPOS`, `BUMP` | done, tested on MiSTer |
 | 6 | six-voice sound: `SOUND`, `PLAY`, `VOL`, `FILTER` for voices 1–6, `SID6 ON/OFF` | done, tested on MiSTer |
 
 ## Commands so far
