@@ -8,7 +8,7 @@
 ;  Stage 1-3: start-up line, VIC-IIx unlock, PALETTE, RPALETTE(),
 ;              SPRITE for sprites 1-24, SPRPTR
 ;  Stage 4:   MOVSPR, RSPRITE(), RSPPOS(), BUMP(), SPRSAV for sprites 1-24
-;  Stage 7:   $hex/%binary numbers, MOD(), DIV(), FIND, MERGE, DUMP
+;  Stage 7:   MOD(), DIV(), FIND, MERGE, DUMP
 ;  Stage 6:   six-voice sound with the second SID at $D420: SOUND, PLAY,
 ;              VOL and FILTER for voices 1-6, SID6 ON/OFF
 ;
@@ -98,7 +98,6 @@ stop       = $FFE1      ; Kernal STOP: Z = 1 if pressed
 execute_a_line = $4DCD  ; BASIC main loop: X/Y = line - 1
 intflg     = $10
 lowtr      = $61
-lstpnt     = $4B      ; LIST: index into the line
 index2     = $26
 curlin     = $3B
 txttab     = $2D
@@ -165,16 +164,13 @@ FN_RSPPOS   = $42       ; $CE $42
 FN_BUMP     = $43       ; $CE $43
 FN_MOD      = $44       ; $CE $44  MOD(a,b)
 FN_DIV      = $45       ; $CE $45  DIV(a,b)
-FN_HEX      = $46       ; $CE $46  $hex number (made by the tokenizer)
-FN_BIN      = $47       ; $CE $47  %binary number
-esc_fn_tk  = $CE
 TK_FIND     = $4A       ; $FE $4A
 TK_MERGE    = $4B       ; $FE $4B
 TK_DUMP     = $4C       ; $FE $4C
 CMD_FIRST   = $40
 CMD_LAST    = $4C
 FN_FIRST    = $40
-FN_LAST     = $47
+FN_LAST     = $45
 
 ; =============================================================================
 ;  ROM image: 32K. $8000 half is empty, code is in the $C000 half.
@@ -437,7 +433,7 @@ syscall_ax: sta sysvec
 ;       no match: C=1, A unchanged
 ; -----------------------------------------------------------------------------
 rom_crunch: ldx merge_on              ; MERGE: the line is tokenized already
-            beq cr_hx
+            beq cr_kw
             ldy #0
 cr_m1:      lda (txtptr),y
             beq cr_m2
@@ -447,34 +443,6 @@ cr_m1:      lda (txtptr),y
             bne cr_m1
 cr_m2:      sec                       ; A = 0: end of line
             rts
-cr_hx:      cmp #'$'                  ; $hex / %binary number?
-            beq cr_h0
-            cmp #'%'
-            bne cr_kw
-cr_h0:      sta lt_kind
-            lda txtptr+1              ; only in BASIC's input buffer
-            cmp #>buf
-            bne cr_h9
-            ldy txtptr                ; character before it: after a letter or
-            beq cr_h2                 ; digit it is a variable (A$, B%)
-            lda buf-1,y
-            cmp #'0'
-            bcc cr_h2
-            cmp #'9'+1
-            bcc cr_h9
-            cmp #'A'
-            bcc cr_h2
-            cmp #'Z'+1
-            bcc cr_h9
-cr_h2:      jsr lit_parse             ; C=0: lt_val, lt_cnt digits
-            bcs cr_h9                 ; no digits or too big: leave the text
-            jsr lit_store             ; C=0: replaced, txtptr after it
-            bcs cr_h9
-            ldy #0
-            lda (txtptr),y            ; BASIC goes on from the next character
-            sec
-            rts
-cr_h9:      lda lt_kind
 cr_kw:      sta tmpa
             ldx #0
 cr_next:    lda kwtab,x
@@ -611,9 +579,8 @@ fn_4:       cmp #FN_MOD
             bne fn_5
             jmp do_mod
 fn_5:       cmp #FN_DIV
-            bne fn_6
+            bne ex_bad
             jmp do_div
-fn_6:       jmp do_hexlit             ; FN_HEX, FN_BIN
 
 ; -----------------------------------------------------------------------------
 ;  PALETTE c,hue,lum   PALETTE ON   PALETTE OFF   PALETTE RESET
@@ -1784,8 +1751,6 @@ rl_fn:      cmp #FN_FIRST
             bcc rl_pass
             cmp #FN_LAST+1
             bcs rl_pass
-            cmp #FN_HEX
-            bcs rl_lit
             sbc #FN_FIRST-1
             tay
             lda fnname_lo,y
@@ -1794,17 +1759,6 @@ rl_fn:      cmp #FN_FIRST
             sta index1+1
             clc
 rl_pass:    jmp (old_lst)
-rl_lit:     tax                       ; $hex / %binary number
-            lda mmucr
-            pha
-            lda #CFG_71
-            sta mmucr
-            txa
-            jsr rom_listlit
-            pla
-            sta mmucr
-            clc
-            jmp (old_lst)
 
 ; --- statement hook: A = second token, C = 1 -----------------------------------
 r_exec:     bcc re_pass
@@ -2042,15 +1996,6 @@ sm_bit:     .byte 0
 sm_base:    .byte 0
 sm_y:       .byte 0
 tmpa2:      .byte 0
-lt_kind:    .byte 0                   ; $hex / %binary
-lt_val:     .word 0
-lt_cnt:     .byte 0
-lt_buf:     .fill 18, 0               ; replacement text / LIST text
-lt_new:     .byte 0
-lt_pos:     .byte 0
-lt_old:     .byte 0
-lt_end:     .byte 0
-lt_i:       .byte 0
 md_kind:    .byte 0                   ; MOD / DIV (also MERGE)
 md_a:       .word 0
 md_b:       .word 0
@@ -2586,375 +2531,11 @@ tick:       jsr snd_irq
 
 ; =============================================================================
 ;  Stage 7: programming tools
-;    $hex and %binary numbers in expressions, MOD() and DIV()
+;    MOD() and DIV()
 ;    FIND "text"     list the lines that contain text
 ;    MERGE "file"    add a program from disk to the one in memory
 ;    DUMP            list the simple variables with their values
 ; =============================================================================
-
-; -----------------------------------------------------------------------------
-;  $hex / %binary numbers. They are converted when the line is typed (from
-;  rom_crunch), so running a program costs nothing extra:
-;     $D040  ->  $CE $46 "(4,53312)"     (%101 -> $CE $47 "(3,5)")
-;  BASIC evaluates "(4,53312)" itself; LIST shows the number as typed.
-; -----------------------------------------------------------------------------
-
-; digits after the '$' / '%' at txtptr -> lt_val, lt_cnt; C=1 if none or > 16 bits
-lit_parse:  lda #0
-            sta lt_val
-            sta lt_val+1
-            sta lt_cnt
-            ldy #1
-lp_next:    lda (txtptr),y
-            ldx lt_kind
-            cpx #'%'
-            beq lp_bin
-            cmp #'0'
-            bcc lp_end
-            cmp #'9'+1
-            bcc lp_dec
-            cmp #'A'
-            bcc lp_end
-            cmp #'F'+1
-            bcs lp_end
-            sbc #'A'-11               ; C=0: A-F -> 10-15
-            jmp lp_hex
-lp_dec:     and #$0F
-lp_hex:     ldx #4
-lp_h1:      asl lt_val
-            rol lt_val+1
-            bcs lp_bad
-            dex
-            bne lp_h1
-            ora lt_val
-            sta lt_val
-            jmp lp_digit
-lp_bin:     cmp #'0'
-            beq lp_b1
-            cmp #'1'
-            bne lp_end
-lp_b1:      lsr a                     ; C = bit
-            rol lt_val
-            rol lt_val+1
-            bcs lp_bad
-lp_digit:   inc lt_cnt
-            iny
-            bne lp_next
-lp_end:     lda lt_cnt
-            beq lp_bad
-            clc
-            rts
-lp_bad:     sec
-            rts
-
-; replace the literal at txtptr (1 + lt_cnt characters) with its tokens;
-; C=1 if the line would get too long (then nothing is changed)
-lit_store:  ldx #0                    ; build the replacement in lt_buf
-            lda #esc_fn_tk
-            sta lt_buf,x
-            inx
-            lda #FN_HEX
-            ldy lt_kind
-            cpy #'$'
-            beq ls_1
-            lda #FN_BIN
-ls_1:       sta lt_buf,x
-            inx
-            lda #'('
-            sta lt_buf,x
-            inx
-            lda lt_cnt                ; number of digits as typed (1-16)
-            cmp #10
-            bcc ls_2
-            sbc #10
-            pha
-            lda #'1'
-            sta lt_buf,x
-            inx
-            pla
-ls_2:       ora #'0'
-            sta lt_buf,x
-            inx
-            lda #','
-            sta lt_buf,x
-            inx
-            lda lt_val                ; value in decimal, no leading zeros
-            sta md_a
-            lda lt_val+1
-            sta md_a+1
-            jsr dec_out               ; appends to lt_buf at X
-            lda #')'
-            sta lt_buf,x
-            inx
-            stx lt_new                ; new length
-
-            lda txtptr                ; old literal: buf offset and length
-            sta lt_pos
-            ldy lt_cnt
-            iny
-            sty lt_old
-            ldy txtptr                ; end of the line (offset of its 0)
-ls_3:       lda buf,y
-            beq ls_4
-            iny
-            bne ls_3
-ls_4:       sty lt_end
-            tya                       ; new end = end - old + new
-            sec
-            sbc lt_old
-            clc
-            adc lt_new
-            bcs ls_bad
-            cmp #160
-            bcs ls_bad
-            lda lt_new                ; move the rest of the line
-            cmp lt_old
-            bcc ls_left
-            beq ls_copy
-            ldy lt_end                ; right, from the end backwards
-ls_r1:      lda buf,y
-            sty lt_i
-            pha
-            tya
-            sec
-            sbc lt_old
-            clc
-            adc lt_new
-            tay
-            pla
-            sta buf,y
-            ldy lt_i
-            cpy lt_pos
-            beq ls_copy
-            dey
-            tya
-            sec
-            sbc lt_pos
-            cmp lt_old
-            bcs ls_r1
-            bcc ls_copy
-ls_left:    lda lt_pos                ; left, from the start of the rest
-            clc
-            adc lt_old
-            tay
-ls_l1:      lda buf,y
-            sty lt_i
-            pha
-            tya
-            sec
-            sbc lt_old
-            clc
-            adc lt_new
-            tay
-            pla
-            sta buf,y
-            ldy lt_i
-            iny
-            cmp #0
-            bne ls_l1
-ls_copy:    ldx #0                    ; the replacement
-            ldy lt_pos
-ls_c1:      lda lt_buf,x
-            sta buf,y
-            iny
-            inx
-            cpx lt_new
-            bne ls_c1
-            sty txtptr                ; continue after it
-            clc
-            rts
-ls_bad:     sec
-            rts
-
-; md_a (0-65535) as decimal digits -> lt_buf at X (X advanced)
-dec_out:    lda #0
-            sta mg_lead
-            ldy #4
-do_d1:      lda #0
-            sta tmpc
-do_d2:      lda md_a
-            sec
-            sbc dec_lo,y
-            sta md_r
-            lda md_a+1
-            sbc dec_hi,y
-            bcc do_d3
-            sta md_a+1
-            lda md_r
-            sta md_a
-            inc tmpc
-            bne do_d2
-do_d3:      lda tmpc
-            ora mg_lead
-            beq do_d4
-            sta mg_lead
-            lda tmpc
-            ora #'0'
-            sta lt_buf,x
-            inx
-do_d4:      dey
-            bne do_d1
-            lda md_a
-            ora #'0'
-            sta lt_buf,x
-            inx
-            rts
-
-; run time: $CE $46/$47 "(digits,value)" - BASIC has evaluated the digit
-; count; the value follows
-do_hexlit:  jsr s_chkcom
-            jsr s_frmnum
-            jmp s_chkcls
-
-; LIST: show "(4,53312)" after $CE $46 as "$D040" (from r_list, A = token).
-; Builds the text in lt_buf, points index1 at it and lstpnt at the ')'.
-rom_listlit:
-            sta lt_kind
-            ldy lstpnt
-            iny                       ; '('
-            jsr ll_num                ; digit count as typed
-            sta lt_cnt
-            jsr ll_num                ; value -> md_a
-            sty lstpnt                ; the ')'
-            ldx #0                    ; digits (values) -> savram, high first
-            lda lt_kind
-            cmp #FN_HEX
-            bne ll_bin
-            lda md_a+1
-            jsr ll_nib
-            lda md_a
-            jsr ll_nib
-            jmp ll_sig
-ll_bin:     ldy #16
-ll_b1:      lda #0
-            asl md_a
-            rol md_a+1
-            rol a
-            sta savram,x
-            inx
-            dey
-            bne ll_b1
-ll_sig:     stx lt_old                ; number of digits (4 or 16)
-            ldy #0                    ; significant digits = from the first
-ll_s1:      lda savram,y              ; non-zero one (at least 1)
-            bne ll_s2
-            iny
-            cpy lt_old
-            bne ll_s1
-            dey
-ll_s2:      txa
-            sty lt_i
-            sec
-            sbc lt_i                  ; significant digits
-            cmp lt_cnt                ; width = max(typed, significant)
-            bcs ll_w
-            lda lt_cnt
-ll_w:       sta lt_i
-            ldx #0
-            lda #'$'
-            ldy lt_kind
-            cpy #FN_HEX
-            beq ll_1
-            lda #'%'
-ll_1:       sta lt_buf,x
-            inx
-ll_z:       lda lt_i                  ; leading zeros beyond 4/16 digits
-            cmp lt_old
-            beq ll_d
-            bcc ll_d
-            lda #'0'
-            sta lt_buf,x
-            inx
-            dec lt_i
-            bne ll_z
-ll_d:       lda lt_old                ; then the last lt_i digits
-            sec
-            sbc lt_i
-            tay
-ll_d1:      lda savram,y
-            cmp #10
-            bcc ll_d2
-            adc #'A'-11
-            bne ll_d3
-ll_d2:      ora #'0'
-ll_d3:      sta lt_buf,x
-            inx
-            iny
-            cpy lt_old
-            bne ll_d1
-            dex                       ; last character with bit 7
-            lda lt_buf,x
-            ora #$80
-            sta lt_buf,x
-            lda #<lt_buf
-            sta index1
-            lda #>lt_buf
-            sta index1+1
-            rts
-
-ll_nib:     pha                       ; two hex digits of A -> savram,X
-            lsr a
-            lsr a
-            lsr a
-            lsr a
-            sta savram,x
-            inx
-            pla
-            and #$0F
-            sta savram,x
-            inx
-            rts
-
-; decimal number in the line at lowtr+Y+1 -> md_a and A (low byte);
-; Y ends on the character after it
-ll_num:     lda #0
-            sta md_a
-            sta md_a+1
-ll_n1:      iny
-            sty lt_pos
-            jsr ll_get
-            ldy lt_pos
-            cmp #'0'
-            bcc ll_n2
-            cmp #'9'+1
-            bcs ll_n2
-            and #$0F
-            pha                       ; md_a = md_a * 10 + digit
-            lda md_a
-            sta md_r
-            lda md_a+1
-            sta md_r+1
-            asl md_a
-            rol md_a+1
-            asl md_a
-            rol md_a+1
-            lda md_a
-            clc
-            adc md_r
-            sta md_a
-            lda md_a+1
-            adc md_r+1
-            sta md_a+1
-            asl md_a
-            rol md_a+1
-            pla
-            clc
-            adc md_a
-            sta md_a
-            bcc ll_n1
-            inc md_a+1
-            bne ll_n1
-ll_n2:      lda md_a
-            rts
-
-ll_get:     tya                       ; byte Y of the line at lowtr (RAM 0)
-            clc
-            adc lowtr
-            sta peekaddr
-            lda lowtr+1
-            adc #0
-            sta peekaddr+1
-            jmp r_peek0
 
 ; -----------------------------------------------------------------------------
 ;  MOD(a, b) and DIV(a, b): remainder and quotient of a / b, 0-65535

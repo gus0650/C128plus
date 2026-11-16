@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""End-to-end tests for BASIC 7.1's programming tools (stage 7): $hex and
-%binary numbers, MOD(), DIV(), FIND, MERGE, DUMP. Boots the real Kernal and
+"""End-to-end tests for BASIC 7.1's programming tools (stage 7): MOD(),
+DIV(), FIND, MERGE, DUMP. Boots the real Kernal and
 BASIC from boot0.rom plus BASIC 7.1 in the C128 simulator; MERGE reads from
 a pretend disk drive.
 
@@ -52,30 +52,15 @@ def main():
     b2 = open(sys.argv[2] if len(sys.argv) > 2 else os.path.join(HERE, 'boot2.rom'), 'rb').read()
     m = boot(rom, b2)
 
-    # --- $hex and %binary
-    scr = do(m, 'PRINT $D040;%1010;$FFFF;-$10;$0;$DEF0;$DEC+1')
-    check('$D040 %1010 $FFFF -$10 $0 $DEF0 $DEC+1', ' 53312  10  65535 -16  0  57072  3565' in scr, scr)
-    scr = do(m, 'BANK 15:POKE $1300,%10101011:PRINT PEEK($1300)')
-    check('POKE/PEEK with $ and %', ' 171' in scr, scr)
-    scr = do(m, 'PRINT $10000')
-    check('$10000 (too big) is SYNTAX', 'SYNTAX' in scr, scr)
-    m.type('NEW\r20 A%=%11:B=$00FF+%00000101+$0+%1111111111111111:PRINT A%;B\rLIST\r'); m.run(250000)
-    check('LIST keeps leading zeros and long binary numbers',
-          m.screen().replace('\n', '').count('20 A%=%11:B=$00FF+%00000101+$0+%1111111111111111:PRINT A%;B') == 2, m.screen())
-    scr = do(m, 'RUN')
-    check('RUN: A%=3, B=65795', ' 3  65795' in scr, scr)
-    scr = do(m, 'PRINT $G')
-    check('$ without digits is SYNTAX', 'SYNTAX' in scr, scr)
+    # --- $hex is not a number (feature removed): A$ etc. still work
     scr = do(m, 'A$="X":B%=7:PRINT A$CHR$(65);B%')
-    check('string variables still work (A$CHR$...)', 'XA 7' in scr, scr)
-    m.type('NEW\r10 X=$D0+%11:PRINT X;$C0DE\rLIST\r'); m.run(200000)
-    check('LIST keeps $D0+%11 and $C0DE', m.screen().count('10 X=$D0+%11:PRINT X;$C0DE') == 2, m.screen())
-    scr = do(m, 'RUN')
-    check('RUN with hex numbers', ' 211  49374' in scr, scr)
+    check('string variables work (A$CHR$...)', 'XA 7' in scr, scr)
+    scr = do(m, 'PRINT $D040')
+    check('$D040 is a SYNTAX ERROR (no hex numbers)', 'SYNTAX' in scr, scr)
 
     # --- MOD / DIV
-    scr = do(m, 'PRINT MOD(17,5);DIV(17,5);MOD(DIV(100,7),4);DIV($FFFF,256)')
-    check('MOD(17,5)=2 DIV(17,5)=3, nested, DIV($FFFF,256)=255', ' 2  3  2  255' in scr, scr)
+    scr = do(m, 'PRINT MOD(17,5);DIV(17,5);MOD(DIV(100,7),4);DIV(65535,256)')
+    check('MOD(17,5)=2 DIV(17,5)=3, nested, DIV(65535,256)=255', ' 2  3  2  255' in scr, scr)
     scr = do(m, 'PRINT DIV(1,0)')
     check('DIV(1,0) is DIVISION BY ZERO', 'DIVISION BY ZERO' in scr, scr)
     scr = do(m, 'PRINT MOD(-1,2)')

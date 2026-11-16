@@ -5,42 +5,10 @@ of Simons' BASIC for the C64:
 
 | Feature | Example |
 |---|---|
-| hex and binary numbers | `POKE $D040,%10000001` |
 | `MOD()`, `DIV()` | `PRINT MOD(17,5);DIV(17,5)` → 2 3 |
 | `FIND` | `FIND "SPRITE"` lists every line that uses `SPRITE` |
 | `MERGE` | `MERGE "SUBS"` adds the lines of a program on disk |
 | `DUMP` | lists all variables with their values |
-
-## Hex and binary numbers
-
-Anywhere BASIC expects a number, you can write it in hex with `$` or in
-binary with `%`:
-
-```
-POKE $D020,0                 : REM border black (53280)
-PRINT $D040, %1010           : REM 53312, 10
-SPRITE 9,1:POKE $D051,PEEK($D051) OR %00000011
-A=$FF+1                      : REM 256
-```
-
-- Values are 0–65535 (`$0`–`$FFFF`, up to 16 binary digits). A larger value,
-  or `$`/`%` without digits, gives `?SYNTAX ERROR`.
-- They work in expressions, in direct mode and in programs, and `LIST` shows
-  them as typed, leading zeros included. A minus sign works as usual: `-$10`
-  is −16.
-- They cost no speed: BASIC 7.1 converts them when you type the line, so a
-  running program evaluates them like any other number.
-- In memory each number takes a few bytes more than typed (`$D040` takes 11
-  bytes instead of 5). If a long line would no longer fit into BASIC's
-  160-character line, the number is left as typed and gives `?SYNTAX ERROR`.
-- They don't work in `DATA` lines or for `INPUT`, and `FIND` can't search for
-  them.
-- `$` after a letter or digit is still a string variable: `A$`, `X1$`.
-- Leave a space between a hex number and a keyword that starts with A–F,
-  otherwise the letters are read as hex digits: `IF X=$FF AND Y` rather
-  than `IF X=$FFAND Y`.
-
-`HEX$()` and `DEC()` still exist for converting at run time.
 
 ## MOD and DIV
 
@@ -121,7 +89,7 @@ certain point while debugging.
   words when BASIC 7.1 is installed. A variable whose name starts with them
   no longer works when typed: `MODE`, `DIVE`, `FINDX` and `DUMPS` are read as
   the keyword plus a letter. Programs loaded from disk are not affected.
-- Programs that use these keywords or `$`/`%` numbers need the C128+ with
+- Programs that use these keywords need the C128+ with
   BASIC 7.1. On a normal C128, those lines stop with `?SYNTAX ERROR`.
 
 ## Test program
@@ -134,8 +102,8 @@ DLOAD "TOOLTEST"
 RUN
 ```
 
-It prints hex, binary, `MOD` and `DIV` results with the values they should
-have and runs `DUMP`. Then it asks you to type `FIND "DUMP"`, which lists
+It prints `MOD` and `DIV` results with the values they should have and runs
+`DUMP`. Then it asks you to type `FIND "DUMP"`, which lists
 lines 10, 80 and 100 (the keyword in line 80, the word in the `REM` and the
 string), and `MERGE "MERGEPART"`. After that, `RUN` again ends with "MERGE
 WORKED: 255".
@@ -145,11 +113,6 @@ the C128 simulator; for `MERGE` it uses a pretend disk drive.
 
 ## How it works
 
-- **`$`/`%` numbers:** when you type a line, BASIC 7.1's tokenizer hook
-  replaces `$D040` with a BASIC 7.1 function token followed by `(4,53312)`:
-  the number of digits as typed and the value in decimal. BASIC evaluates
-  that with its own number routine, so nothing slows down elsewhere. `LIST`
-  turns it back into `$D040`. Tokens: `$CE $46` (hex), `$CE $47` (binary).
 - **`MERGE`:** BASIC 7.1 opens the file, then points BASIC's main loop
   (`$0302`) at itself. For each line in the file it hands BASIC the line
   number and the tokenized text, and BASIC stores it with its own code,
