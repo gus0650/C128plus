@@ -406,8 +406,8 @@ def test_sprptr():
     assert pp(b' 24,202') is None and r[0x07EF] == 202
     v[0xD018] = 0x24                                                  # screen $0800
     assert pp(b' 2,7') is None and r[0x0BF9] == 7
-    v[0xD074] = 1                                                     # wide: $0800 + $7F8
-    assert pp(b' 2,8') is None and r[0x0FF9] == 8
+    v[0xD074] = 1                                                     # bit 0 (former WIDE) is ignored
+    assert pp(b' 2,8') is None and r[0x0BF9] == 8
     v[0xD074] = 2; v[0xD075] = 0x0E                                   # pointer page $0E00
     assert pp(b' 1,9') is None and r[0x0EF8] == 9
     assert pp(b' 17,10') is None and r[0x0EE8] == 10
