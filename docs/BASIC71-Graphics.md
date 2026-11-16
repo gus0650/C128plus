@@ -258,6 +258,14 @@ A sprite only reports a collision while it is actually displayed: if it is
 skipped because it shares its slot with another sprite on the same line, it
 doesn't collide either.
 
+A BASIC 7.0 quirk to watch for: `COLLISION 1` without a line number
+switches the trap off, but a collision that has already been noted is still
+carried out afterwards, as a `GOSUB` to a line that doesn't exist:
+`?UNDEF'D STATEMENT ERROR`. Sprites that keep touching cause a new
+collision every frame. So first separate or switch off the sprites, wait a
+moment (e.g. `SLEEP 1`) so pending traps are handled, then switch
+`COLLISION` off. This happens with sprites 1–8 on a normal C128 too.
+
 Don't `PEEK` `$D01E`/`$D01F` (53278/53279) yourself while using `BUMP`:
 reading them clears the collision bits of all 24 sprites, and BASIC 7.1
 then can't collect them.
