@@ -12,6 +12,8 @@ on:
     paths-ignore:
       - 'basic71/**'
       - 'basic70/**'
+      - '.github/release-notes/**'
+      - '.github/workflows/release.yml'
       - 'docs/**'
       - '**.md'
   workflow_dispatch:
