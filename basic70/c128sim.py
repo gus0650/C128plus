@@ -289,6 +289,46 @@ class C128:
         s.cpu.pc = s.cpu.rw(0xFFFC); s.cpu.i = 1
         s.steps = 0
         s.traps = {0xF890} | set(skip)  # skip disk boot
+        s.hooks = {}                    # address -> Python function (then RTS)
+
+    def fake_disk(s, files):
+        """Kernal file calls for a pretend drive: files = {name: bytes}."""
+        st = {'data': b'', 'pos': 0, 'open': False, 'in': False}
+        c = s.cpu; r = s.mem.ram
+        def setnam():
+            st['len'], st['adr'] = c.a, c.x | c.y << 8; return True
+        def setlfs():
+            st['lfn'] = c.a; return True
+        def setbnk():
+            st['fbank'] = c.x; return True
+        def open_():
+            name = bytes(s.mem.ram[st.get('fbank', 0)][st['adr']:st['adr'] + st['len']]).decode('latin-1')
+            st.update(data=files.get(name, b''), pos=0, open=True); c.c = 0   # not found shows on read
+            return True
+        def chkin():
+            if not (st['open'] and c.x == st.get('lfn')): return False
+            st['in'] = True; c.c = 0; return True
+        def basin():
+            if not st['in']: return False
+            if st['pos'] < len(st['data']):
+                c.a = st['data'][st['pos']]; st['pos'] += 1
+            else:
+                c.a = 0
+            return True
+        def readst():
+            if not st['in']: return False
+            c.a = 0x42 if not st['data'] else 0x40 if st['pos'] >= len(st['data']) else 0
+            return True
+        def clrchn():
+            st['in'] = False; return False
+        def close():
+            if c.a != st.get('lfn'): return False
+            st['open'] = False; st['in'] = False; return True
+        for adr, f in ((0xFFBD, setnam), (0xFFBA, setlfs), (0xFF68, setbnk), (0xFFC0, open_),
+                       (0xFFC6, chkin), (0xFFCF, basin), (0xFFB7, readst), (0xFFCC, clrchn), (0xFFC3, close)):
+            s.hooks[adr] = f
+        return st
+
     def do_rts(s):
         c = s.cpu; lo = c.pull(); hi = c.pull(); c.pc = ((hi << 8 | lo) + 1) & 0xFFFF
 
@@ -297,6 +337,9 @@ class C128:
         for _ in range(n):
             if c.pc in s.traps and m.cr & 0x30 == 0:
                 s.do_rts(); continue
+            if c.pc in s.hooks and m.cr & 0x30 == 0:
+                if s.hooks[c.pc]():
+                    s.do_rts(); continue
             c.step(); s.steps += 1
             if s.steps % irq_every == 0:
                 m.vic_irq |= 1

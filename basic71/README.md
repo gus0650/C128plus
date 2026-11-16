@@ -1,6 +1,6 @@
 # C128+ BASIC 7.1
 
-BASIC 7.1 extends the C128's BASIC 7.0 with commands for the VIC-IIx and for the second SID. It is an internal function ROM: the C128 Kernal finds it at power-up and starts it automatically. The ROM unlocks the VIC-IIx and prints `C128+ BASIC 7.1 - VIC-IIX EXTENSIONS` under the normal start-up message.
+BASIC 7.1 extends the C128's BASIC 7.0 with commands for the VIC-IIx and the second SID, and with programming tools (see [docs/BASIC71-Tools.md](../docs/BASIC71-Tools.md)). It is an internal function ROM: the C128 Kernal finds it at power-up and starts it automatically. The ROM unlocks the VIC-IIx and prints `C128+ BASIC 7.1 - VIC-IIX EXTENSIONS` under the normal start-up message.
 
 All code here was written for the C128+. No Commodore ROM code is included or modified.
 
@@ -19,6 +19,7 @@ BASIC 7.1 is being built in stages:
 | 3 | `SPRITE`, `SPRPTR` for sprites 1–24 | done, tested on MiSTer |
 | 4 | `MOVSPR` with automatic movement for all 24 sprites, `RSPRITE`, `RSPPOS`, `BUMP` | done, tested on MiSTer |
 | 4b | `SPRSAV` for sprites 1–24 | done, to be tested on MiSTer (`test/gfxtest`) |
+| 7 | `$hex`/`%binary` numbers, `MOD()`, `DIV()`, `FIND`, `MERGE`, `DUMP` | done, to be tested on MiSTer (`test/tools.d64`) |
 | 6 | six-voice sound: `SOUND`, `PLAY`, `VOL`, `FILTER` for voices 1–6, `SID6 ON/OFF` | done, tested on MiSTer |
 
 ## Commands so far
@@ -72,7 +73,7 @@ Inside, BASIC 7.1 has its own sound engine for all six voices, with the same alg
 - **New keywords:** BASIC 7.1 hooks BASIC 7.0's escape-token vectors for tokenizing (`$030C`), listing (`$030E`) and executing statements (`$0310`) and functions (`$02FC`). BASIC 7.1 statements are `$FE $40` and up, functions `$CE $40` and up, above BASIC's own escape tokens.
 - **Running BASIC 7.1 code:** while BASIC 7.1 code runs, the MMU maps the BASIC 7.1 ROM at `$C000` with both BASIC ROMs and I/O visible (configuration `$10`). The Kernal is not visible then, and BASIC switches the memory map while it reads variables. So every call into BASIC or the Kernal goes through a small routine in RAM that calls it with the Kernal's `JSRFAR` in the normal BASIC map. `JSRFAR` returns through common RAM, so this also works for BASIC routines that return with RAM bank 1 switched in.
 - **Interrupts:** the interrupt entry and exit code at `$FF05–$FF41` is byte-identical to the Kernal's, because the CPU continues in the other copy at the same address when the map changes.
-- **RAM:** BASIC 7.1 uses `$1800–$1BFF` (911 bytes so far, of 1024), part of the 1K that the C128 Kernal reserves for function ROM software. It also uses the Kernal's `JSRFAR` parameters at `$02–$08`, which BASIC itself only uses for `SYS`.
+- **RAM:** BASIC 7.1 uses `$1800–$1BFF` (983 bytes so far, of 1024), part of the 1K that the C128 Kernal reserves for function ROM software. It also uses the Kernal's `JSRFAR` parameters at `$02–$08`, which BASIC itself only uses for `SYS`.
 
 ## Building and testing
 
@@ -83,6 +84,7 @@ python3 build.py boot2.rom    # assemble basic71.asm into the 32K ROM image
 python3 test_basic71.py            # run the tests on a simulated 6502
 python3 test_sound.py boot0.rom    # six-voice sound, with the real Kernal and BASIC
 python3 test_graphics.py boot0.rom # VIC-IIx commands, with the real Kernal and BASIC
+python3 test_tools.py boot0.rom    # $hex, MOD/DIV, FIND, MERGE, DUMP
 ```
 
 `asm6502.py` is a small 6502 assembler written for this project. `test_basic71.py` runs BASIC 7.1 on a simulated 6502 with Python stand-ins for the BASIC routines, and checks that the memory map is correct whenever BASIC 7.1 or BASIC code runs. `test_sound.py` boots the real Kernal and BASIC from an original C128 `boot0.rom` together with BASIC 7.1 in the C128 simulator from `../basic70`, types commands and checks the writes to both SIDs.

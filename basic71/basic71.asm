@@ -8,6 +8,7 @@
 ;  Stage 1-3: start-up line, VIC-IIx unlock, PALETTE, RPALETTE(),
 ;              SPRITE for sprites 1-24, SPRPTR
 ;  Stage 4:   MOVSPR, RSPRITE(), RSPPOS(), BUMP(), SPRSAV for sprites 1-24
+;  Stage 7:   $hex/%binary numbers, MOD(), DIV(), FIND, MERGE, DUMP
 ;  Stage 6:   six-voice sound with the second SID at $D420: SOUND, PLAY,
 ;              VOL and FILTER for voices 1-6, SID6 ON/OFF
 ;
@@ -81,6 +82,31 @@ jiffy      = $A2        ; low byte of the jiffy clock (TI)
 cinv       = $0314      ; Kernal IRQ vector
 system_vector = $0A00   ; Kernal warm start vector (RUN/STOP + RESTORE)
 
+; BASIC 7.0 routines for the programming tools (stage 7)
+getadr     = $8815      ; FAC -> 0-65535 in Y (low) / A (high)
+frmnum     = $77D7      ; numeric expression -> FAC
+error      = $4D3C      ; BASIC error X
+errdvo     = 20         ; ?DIVISION BY ZERO
+movfm      = $8BD4      ; FAC <- 5 bytes at A (low) / Y (high), RAM 0
+fout       = $8E42      ; FAC -> string, A/Y = its address
+strout     = $55E2      ; print string at A/Y
+givayf     = $793C      ; FAC <- signed A (high) / Y (low)
+crunch     = $430A      ; tokenize the text at txtptr
+crdo       = $5598      ; print RETURN
+p1line     = $5123      ; list the line at lowtr (X/A = its number)
+stop       = $FFE1      ; Kernal STOP: Z = 1 if pressed
+execute_a_line = $4DCD  ; BASIC main loop: X/Y = line - 1
+intflg     = $10
+lowtr      = $61
+index2     = $26
+curlin     = $3B
+txttab     = $2D
+vartab     = $2F
+arytab     = $31
+buf        = $0200
+imain      = $0302      ; BASIC main loop vector
+ieval      = $030A      ; BASIC term evaluation vector
+
 ; BASIC 7.0 sprite routines and data (318018/318019-04)
 movspr_cont = $6CC9     ; BASIC's MOVSPR after reading the sprite number
 z_p_temp_1 = $77        ; sprite number 0-7 for MOVSPR
@@ -137,10 +163,15 @@ FN_RPALETTE = $40       ; $CE $40
 FN_RSPRITE  = $41       ; $CE $41  (replace BASIC's RSPRITE, RSPPOS, BUMP)
 FN_RSPPOS   = $42       ; $CE $42
 FN_BUMP     = $43       ; $CE $43
+FN_MOD      = $44       ; $CE $44  MOD(a,b)
+FN_DIV      = $45       ; $CE $45  DIV(a,b)
+TK_FIND     = $4A       ; $FE $4A
+TK_MERGE    = $4B       ; $FE $4B
+TK_DUMP     = $4C       ; $FE $4C
 CMD_FIRST   = $40
-CMD_LAST    = $49
+CMD_LAST    = $4C
 FN_FIRST    = $40
-FN_LAST     = $43
+FN_LAST     = $45
 
 ; =============================================================================
 ;  ROM image: 32K. $8000 half is empty, code is in the $C000 half.
@@ -229,6 +260,14 @@ cs_copy:    lda ramimage,x
             sta s6_on
             jsr snd_init
             jsr spr_stop
+            lda ieval                 ; $hex / %binary in expressions
+            sta old_eval
+            lda ieval+1
+            sta old_eval+1
+            lda #<r_eval
+            sta ieval
+            lda #>r_eval
+            sta ieval+1
 
             ; unlock the VIC-IIx
             lda #$A5
@@ -252,7 +291,7 @@ cs_ptr:     txa
 cs_msg:     lda banner,x
             beq cs_done
             stx tmpx
-            jsr r_chrout
+            jsr s_chrout
             ldx tmpx
             inx
             bne cs_msg
@@ -315,6 +354,48 @@ s_strlit:   sta tmpa2                 ; A = length
             sta sysvec+1
             lda tmpa2
             jmp syscall
+s_chrout:   sta tmpa                  ; character out through the Kernal
+            lda #<chrout
+            sta sysvec
+            lda #>chrout
+            sta sysvec+1
+            lda tmpa
+            jmp syscall
+s_getadr:   lda #<getadr
+            ldx #>getadr
+            jmp syscall_ax
+s_frmnum:   lda #<frmnum
+            ldx #>frmnum
+            jmp syscall_ax
+s_fout:     lda #<fout
+            ldx #>fout
+            jmp syscall_ax
+s_error:    lda #<error               ; X = error number
+            sta sysvec
+            lda #>error
+            sta sysvec+1
+            jmp syscall
+s_movfm:    pha                       ; A/Y = address
+            lda #<movfm
+            sta sysvec
+            lda #>movfm
+            sta sysvec+1
+            pla
+            jmp syscall
+s_strout:   pha
+            lda #<strout
+            sta sysvec
+            lda #>strout
+            sta sysvec+1
+            pla
+            jmp syscall
+s_givayf:   pha
+            lda #<givayf
+            sta sysvec
+            lda #>givayf
+            sta sysvec+1
+            pla
+            jmp syscall
 s_chkcom:   lda #<chkcom
             ldx #>chkcom
             jmp syscall_ax
@@ -360,7 +441,55 @@ syscall_ax: sta sysvec
 ;                 Y = index of the last keyword character (as BASIC's RESER)
 ;       no match: C=1, A unchanged
 ; -----------------------------------------------------------------------------
-rom_crunch: sta tmpa
+rom_crunch: ldx merge_on              ; MERGE: the line is tokenized already
+            beq cr_hx
+            ldy #0
+cr_m1:      lda (txtptr),y
+            beq cr_m2
+            inc txtptr
+            bne cr_m1
+            inc txtptr+1
+            bne cr_m1
+cr_m2:      sec                       ; A = 0: end of line
+            rts
+cr_hx:      cmp #'$'                  ; $hex number: leave its digits alone
+            bne cr_kw
+            lda txtptr                ; character before the '$'
+            bne cr_h1
+            dec txtptr+1
+cr_h1:      dec txtptr
+            ldy #0
+            lda (txtptr),y
+            tax
+            inc txtptr
+            bne cr_h2
+            inc txtptr+1
+cr_h2:      txa
+            cmp #'0'                  ; after a letter or digit it is a string
+            bcc cr_h3                 ; variable (A$), not a number
+            cmp #'9'+1
+            bcc cr_h9
+            cmp #'A'
+            bcc cr_h3
+            cmp #'Z'+1
+            bcc cr_h9
+cr_h3:      inc txtptr                ; skip '$' and the hex digits
+            bne cr_h4
+            inc txtptr+1
+cr_h4:      ldy #0
+            lda (txtptr),y
+            cmp #'0'
+            bcc cr_h5
+            cmp #'9'+1
+            bcc cr_h3
+            cmp #'A'
+            bcc cr_h5
+            cmp #'F'+1
+            bcc cr_h3
+cr_h5:      sec                       ; BASIC goes on from the next character
+            rts
+cr_h9:      lda #'$'
+cr_kw:      sta tmpa
             ldx #0
 cr_next:    lda kwtab,x
             beq cr_none               ; end of table
@@ -412,6 +541,11 @@ kwtab:      .byte "RPALETT", 'E'+$80, FN_RPALETTE, $FF
             .byte "SID",     '6'+$80, TK_SID6,     $00
             .byte "MOVSP",   'R'+$80, TK_MOVSPR,   $00
             .byte "SPRSA",   'V'+$80, TK_SPRSAV,   $00
+            .byte "FIN",     'D'+$80, TK_FIND,     $00
+            .byte "MERG",    'E'+$80, TK_MERGE,    $00
+            .byte "DUM",     'P'+$80, TK_DUMP,     $00
+            .byte "MO",      'D'+$80, FN_MOD,      $FF
+            .byte "DI",      'V'+$80, FN_DIV,      $FF
             .byte "RSPRIT",  'E'+$80, FN_RSPRITE,  $FF
             .byte "RSPPO",   'S'+$80, FN_RSPPOS,   $FF
             .byte "BUM",     'P'+$80, FN_BUMP,     $FF
@@ -449,8 +583,17 @@ ex_8:       cmp #TK_MOVSPR
             bne ex_9
             jmp do_movspr
 ex_9:       cmp #TK_SPRSAV
-            bne ex_bad
+            bne ex_10
             jmp do_sprsav
+ex_10:      cmp #TK_FIND
+            bne ex_11
+            jmp do_find
+ex_11:      cmp #TK_MERGE
+            bne ex_12
+            jmp do_merge
+ex_12:      cmp #TK_DUMP
+            bne ex_bad
+            jmp do_dump
 ex_bad:     jmp s_snerr
 
 ; the extensions must be unlocked before BASIC 7.1 touches $D040-$D0FF, otherwise
@@ -476,8 +619,14 @@ fn_2:       cmp #FN_RSPPOS
             bne fn_3
             jmp do_rsppos
 fn_3:       cmp #FN_BUMP
-            bne ex_bad
+            bne fn_4
             jmp do_bump
+fn_4:       cmp #FN_MOD
+            bne fn_5
+            jmp do_mod
+fn_5:       cmp #FN_DIV
+            bne ex_bad
+            jmp do_div
 
 ; -----------------------------------------------------------------------------
 ;  PALETTE c,hue,lum   PALETTE ON   PALETTE OFF   PALETTE RESET
@@ -1542,6 +1691,420 @@ sq_neg:     lda s_step_lo,y
             rts
 
 ; =============================================================================
+;  RAM part, copied to $1800 at start-up (max. 1K)
+; =============================================================================
+code_end:
+            .assert code_end <= $D000, "code runs into the I/O area at $D000"
+
+; The RAM part is stored at $E000 ($D000-$DFFF is hidden by I/O).
+            .org $E000
+ramimage:
+            .rorg $1800
+
+; SYSCALL: call (sysvec) in the normal BASIC memory map (bank 15) through the
+; Kernal's JSRFAR, then switch back to the map that was active before.
+; JSRFAR's return code lives in common RAM, so this also works for BASIC
+; routines that return with RAM 1 switched in (FRMSTR, for example), where
+; this RAM at $1800 would be invisible. A/X/Y pass through in both
+; directions, flags are returned from the called routine.
+syscall:    sta tmpa
+            php
+            pla
+            sta fr_s                  ; flags for the call
+            lda mmucr
+            pha
+            lda #CFG_SYS
+            sta mmucr
+            lda #15                   ; bank 15: Kernal, BASIC, RAM 0, I/O
+            sta fr_bank
+            lda sysvec+1
+            sta fr_pchi
+            lda sysvec
+            sta fr_pclo
+            lda tmpa
+            sta fr_a
+            stx fr_x
+            sty fr_y
+            jsr jsrfar
+            pla
+            sta mmucr
+            ldx fr_x
+            ldy fr_y
+            lda fr_s
+            pha
+            lda fr_a
+            plp
+            rts
+
+
+; store A at pokeaddr in RAM bank 0, even under ROM or I/O
+; (pokeaddr is the operand of the STA below)
+r_poke0:    ldx mmucr
+            stx savcfg2
+            ldx #$3F                  ; RAM 0 only
+            stx mmucr
+r_pokesta:  sta $FFFF
+            ldx savcfg2
+            stx mmucr
+            rts
+pokeaddr = r_pokesta+1
+
+; A = byte at peekaddr in RAM bank 0, even under ROM or I/O
+r_peek0:    ldx mmucr
+            stx savcfg2
+            ldx #$3F                  ; RAM 0 only
+            stx mmucr
+r_peeklda:  lda $FFFF
+            ldx savcfg2
+            stx mmucr
+            rts
+peekaddr = r_peeklda+1
+
+; --- tokenizer hook ------------------------------------------------------------
+r_crunch:   bcc rc_pass               ; already claimed by someone else
+            pha
+            lda mmucr
+            sta savcfg
+            lda #CFG_71
+            sta mmucr
+            pla
+            jsr rom_crunch
+            php
+            pha
+            lda savcfg
+            sta mmucr
+            pla
+            plp
+rc_pass:    jmp (old_clk)
+
+; --- LIST hook: X = 0 statement / $FF function, A = second token -------------
+r_list:     bcc rl_pass
+            cpx #0
+            bne rl_fn
+            cmp #CMD_FIRST
+            bcc rl_pass
+            cmp #CMD_LAST+1
+            bcs rl_pass
+            sbc #CMD_FIRST-1          ; C=0 here: subtract CMD_FIRST
+            tay
+            lda cmdname_lo,y
+            sta index1
+            lda cmdname_hi,y
+            sta index1+1
+            clc                       ; claimed
+            jmp (old_lst)
+rl_fn:      cmp #FN_FIRST
+            bcc rl_pass
+            cmp #FN_LAST+1
+            bcs rl_pass
+            sbc #FN_FIRST-1
+            tay
+            lda fnname_lo,y
+            sta index1
+            lda fnname_hi,y
+            sta index1+1
+            clc
+rl_pass:    jmp (old_lst)
+
+; --- statement hook: A = second token, C = 1 -----------------------------------
+r_exec:     bcc re_pass
+            cmp #CMD_FIRST
+            bcc re_pass
+            cmp #CMD_LAST+1
+            bcs re_pass
+            tax
+            lda mmucr
+            pha
+            lda #CFG_71
+            sta mmucr
+            txa
+            jsr rom_exec
+            pla
+            sta mmucr
+            rts                       ; back to BASIC's statement loop
+re_pass:    sec
+            jmp (old_exe)
+
+; --- function hook: A = second token, C = 1, FAC = argument --------------------
+r_fn:       bcc rf_pass
+            cmp #FN_FIRST
+            bcc rf_pass
+            cmp #FN_LAST+1
+            bcs rf_pass
+            tax
+            lda mmucr
+            pha
+            lda #CFG_71
+            sta mmucr
+            txa
+            jsr rom_fn
+            pla
+            sta mmucr
+            clc                       ; claimed, result in FAC
+            rts
+rf_pass:    sec
+            jmp (old_fn)
+
+; --- keyword names for LIST (must be in RAM 0) ---------------------------------
+cmdname_lo: .byte <nm_palette, <nm_sprite, <nm_sprptr, <nm_sound, <nm_play, <nm_vol, <nm_filter, <nm_sid6, <nm_movspr, <nm_sprsav, <nm_find, <nm_merge, <nm_dump
+cmdname_hi: .byte >nm_palette, >nm_sprite, >nm_sprptr, >nm_sound, >nm_play, >nm_vol, >nm_filter, >nm_sid6, >nm_movspr, >nm_sprsav, >nm_find, >nm_merge, >nm_dump
+fnname_lo:  .byte <nm_rpalette, <nm_rsprite, <nm_rsppos, <nm_bump, <nm_mod, <nm_div
+fnname_hi:  .byte >nm_rpalette, >nm_rsprite, >nm_rsppos, >nm_bump, >nm_mod, >nm_div
+nm_palette: .byte "PALETT", 'E'+$80
+nm_rpalette: .byte "RPALETT", 'E'+$80
+nm_sprite:  .byte "SPRIT", 'E'+$80
+nm_sprptr:  .byte "SPRPT", 'R'+$80
+nm_sound:   .byte "SOUN", 'D'+$80
+nm_play:    .byte "PLA", 'Y'+$80
+nm_vol:     .byte "VO", 'L'+$80
+nm_filter:  .byte "FILTE", 'R'+$80
+nm_sid6:    .byte "SID", '6'+$80
+nm_movspr:  .byte "MOVSP", 'R'+$80
+nm_sprsav:  .byte "SPRSA", 'V'+$80
+nm_find:    .byte "FIN", 'D'+$80
+nm_merge:   .byte "MERG", 'E'+$80
+nm_dump:    .byte "DUM", 'P'+$80
+nm_mod:     .byte "MO", 'D'+$80
+nm_div:     .byte "DI", 'V'+$80
+
+; --- expression hook: $hex and %binary numbers ---------------------------------
+r_eval:     jsr chrget
+            cmp #'$'
+            beq rv_lit
+            cmp #'%'
+            beq rv_lit
+            lda txtptr                ; not ours: one step back, BASIC reads
+            bne rv_1                  ; the character again
+            dec txtptr+1
+rv_1:       dec txtptr
+            jmp (old_eval)
+rv_lit:     tax
+            lda mmucr
+            pha
+            lda #CFG_71
+            sta mmucr
+            txa
+            jsr rom_literal
+            pla
+            sta mmucr
+            rts
+
+; --- MERGE: BASIC's main loop takes its lines from here ------------------------
+r_merge:    lda mmucr
+            pha
+            lda #CFG_71
+            sta mmucr
+            jsr mg_next               ; C=0: X/Y = line, C=1: done
+            pla
+            sta mmucr
+            bcs rm_done
+            jmp execute_a_line
+rm_done:    jmp (imain)               ; BASIC's own main loop again
+
+nm_rsprite: .byte "RSPRIT", 'E'+$80
+nm_rsppos:  .byte "RSPPO", 'S'+$80
+nm_bump:    .byte "BUM", 'P'+$80
+
+; --- six-voice sound: IRQ hook ---------------------------------------------------
+; Runs before the Kernal's IRQ handler (normal memory map). The music is
+; advanced once per jiffy clock tick, so it keeps BASIC's 60/50 Hz rate even
+; when the screen editor uses extra raster interrupts for split screens.
+r_irq:      lda vicx_key              ; collisions of sprites 9-24: collect them
+            cmp #$FE                  ; before BASIC reads $D01E/$D01F, which
+            bne ri_tick               ; clears all 24 bits
+            lda $D056
+            ora col9
+            sta col9
+            lda $D057
+            ora col9+1
+            sta col9+1
+            lda $D096
+            ora col9+2
+            sta col9+2
+            lda $D097
+            ora col9+3
+            sta col9+3
+ri_tick:    lda jiffy
+            cmp lastjif
+            beq ri_out
+            sta lastjif
+            lda irqbusy
+            bne ri_out
+            inc irqbusy
+            lda mmucr
+            pha
+            lda #CFG_71
+            sta mmucr
+            jsr tick
+            pla
+            sta mmucr
+            dec irqbusy
+ri_out:     jmp (old_irq)
+
+; --- RUN/STOP + RESTORE: the Kernal resets the IRQ vector, then warm starts ---------
+r_warm:     sei
+            lda #CFG_71
+            sta mmucr
+            jsr rom_warm
+            lda #CFG_SYS
+            sta mmucr
+            jmp (old_sysvec)
+
+; --- error during MOVSPR 9-24 or MERGE: clean up, then BASIC's handler ---------
+r_err:      txa                       ; X = $80: no error, BASIC's READY
+            bmi re_ready
+            stx mv_errx
+            php
+            sei
+            lda mmucr
+            pha
+            lda #CFG_71
+            sta mmucr
+            jsr err_cleanup           ; also puts BASIC's error vector back
+            pla
+            sta mmucr
+            plp
+            ldx mv_errx
+re_ready:   jmp (old_ierror)
+
+; --- variables -----------------------------------------------------------------
+; Vectors used with JMP (ind) must not start at $xxFF (the 6502 would read
+; the high byte from $xx00), so they start on an even address.
+            .fill * & 1, 0
+old_clk:    .word 0
+old_lst:    .word 0
+old_exe:    .word 0
+old_fn:     .word 0
+sysvec:     .word 0
+savtxt:     .word 0
+savcfg:     .byte 0
+tmpa:       .byte 0
+tmpp:       .byte 0
+tmpx:       .byte 0
+tmpc:       .byte 0
+tmph:       .byte 0
+tmpv:       .byte 0
+savcfg2:    .byte 0
+spr_n:      .byte 0
+spr_i:      .byte 0
+spr_mask:   .byte 0
+spr_reg:    .byte 0
+spr_blk:    .byte 0
+
+; six-voice sound
+            .fill * & 1, 0
+old_irq:    .word 0
+old_sysvec: .word 0
+old_eval:   .word 0
+old_imain:  .word 0
+lastjif:    .byte 0
+irqbusy:    .byte 0
+s6_on:      .byte 0                   ; SID6 ON/OFF: keywords taken over when typed
+snd_v:      .byte 0
+p_len:      .byte 0
+p_pos:      .byte 0
+p_flag:     .byte 0
+p_sharp:    .byte 0
+p_dnote:    .byte 0
+p_voice:    .byte 0                   ; PLAY's current voice 0-5
+f_flg:      .byte 0
+f_sav:      .byte 0, 0, 0, 0
+; SOUND parameters, in this order (see do_sound)
+t_max_lo:   .byte 0
+t_max_hi:   .byte 0
+t_min_lo:   .byte 0
+t_min_hi:   .byte 0
+t_dir:      .byte 0
+t_step_lo:  .byte 0
+t_step_hi:  .byte 0
+t_freq_lo:  .byte 0
+t_freq_hi:  .byte 0
+t_pw_lo:    .byte 0
+t_pw_hi:    .byte 0
+t_wave:     .byte 0
+t_time_lo:  .byte 0
+t_time_hi:  .byte 0
+; per voice, 6 each; s_max_lo..s_freq_hi must stay in this order
+s_max_lo:   .fill 6, 0
+s_max_hi:   .fill 6, 0
+s_min_lo:   .fill 6, 0
+s_min_hi:   .fill 6, 0
+s_dir:      .fill 6, 0
+s_step_lo:  .fill 6, 0
+s_step_hi:  .fill 6, 0
+s_freq_lo:  .fill 6, 0
+s_freq_hi:  .fill 6, 0
+s_time_lo:  .fill 6, 0
+s_time_hi:  .fill 6, $FF
+m_voices:   .fill 12, $FF             ; PLAY note counters, 2 per voice
+m_wave:     .fill 6, 0                ; PLAY waveform per voice
+; sprites 9-24 (stage 4)
+m_data:     .fill 176, 0              ; motion records, 11 bytes per sprite (as BASIC)
+mv_save:    .fill 14, 0               ; BASIC slot saved during MOVSPR 9-24
+mv_n:       .byte 0
+mv_k:       .byte 0
+mv_bit:     .byte 0
+mv_mi:      .byte 0
+mv_base:    .byte 0
+mv_reg:     .byte 0
+mv_tmp:     .byte 0
+mv_active:  .byte 0
+mv_errx:    .byte 0
+old_ierror: .word 0
+col9:       .fill 4, 0                ; BUMP 3-6: collisions of sprites 9-24
+fn_n:       .byte 0
+fn_a:       .byte 0
+fn_bit:     .byte 0
+fn_base:    .byte 0
+fn_x:       .byte 0
+fn_y:       .byte 0
+fn_msb:     .byte 0
+fn_spd:     .byte 0
+sm_i:       .byte 0
+sm_bit:     .byte 0
+sm_base:    .byte 0
+sm_y:       .byte 0
+tmpa2:      .byte 0
+lt_kind:    .byte 0                   ; $hex / %binary
+lt_val:     .word 0
+lt_cnt:     .byte 0
+md_kind:    .byte 0                   ; MOD / DIV (also MERGE)
+md_a:       .word 0
+md_b:       .word 0
+md_r:       .word 0
+merge_on:   .byte 0
+fd_len:     .byte 0                   ; FIND, DUMP, MERGE
+fd_len2:    .byte 0
+fd_i:       .byte 0
+fd_c:       .byte 0
+fd_x:       .byte 0
+fd_y:       .byte 0
+fd_line:    .word 0
+dp_ptr = fd_line
+mg_lead = fd_c
+sv_adr:     .word 0                   ; SPRSAV
+sv_y:       .byte 0
+vbank:      .byte 0
+fil6:       .fill 10, 0               ; filter/volume, 5 bytes per SID:
+                                      ; +0/+1 cut-off, +2 resonance/routing,
+                                      ; +3 type/volume, +4 current type/volume
+ram_end:
+            .assert (old_clk & $FF) != $FF, "vector old_clk at $xxFF"
+            .assert (old_lst & $FF) != $FF, "vector old_lst at $xxFF"
+            .assert (old_exe & $FF) != $FF, "vector old_exe at $xxFF"
+            .assert (old_fn & $FF) != $FF, "vector old_fn at $xxFF"
+            .assert (sysvec & $FF) != $FF, "vector sysvec at $xxFF"
+            .assert (old_irq & $FF) != $FF, "vector old_irq at $xxFF"
+            .assert (old_sysvec & $FF) != $FF, "vector old_sysvec at $xxFF"
+            .assert (old_eval & $FF) != $FF, "vector old_eval at $xxFF"
+            .assert (old_ierror & $FF) != $FF, "vector old_ierror at $xxFF"
+            .assert ram_end <= $1C00, "RAM part larger than 1K"
+            .rend
+            .assert * < $FF05, "RAM image runs into the interrupt code at $FF05"
+
+; More code after the RAM image ($E000-$FEFF is visible in the BASIC 7.1 map)
+
+; =============================================================================
 ;  Stage 4: MOVSPR, RSPRITE(), RSPPOS(), BUMP() for sprites 1-24.
 ;  Sprites 1-8 use BASIC 7.0's own data (vic_save, sprite_data). For sprites
 ;  9-24, BASIC 7.1 keeps the same 11-byte motion record per sprite (m_data)
@@ -1601,9 +2164,9 @@ mv_ext:     stx mv_n
             sta old_ierror
             lda ierror+1
             sta old_ierror+1
-            lda #<r_moverr
+            lda #<r_err
             sta ierror
-            lda #>r_moverr
+            lda #>r_err
             sta ierror+1
             lda mv_k
             sta z_p_temp_1
@@ -2001,6 +2564,26 @@ sm_s1:      sbc #1
 sm_s2:      sta vic,y
 sm_s3:      rts
 
+; RUN/STOP + RESTORE (from r_warm): the Kernal has reset the IRQ vector
+rom_warm:   lda cinv
+            sta old_irq
+            lda cinv+1
+            sta old_irq+1
+            lda #<r_irq
+            sta cinv
+            lda #>r_irq
+            sta cinv+1
+            lda #0
+            sta irqbusy
+            jsr snd_init
+            jsr spr_stop
+            jmp mg_stop
+
+; error while MOVSPR 9-24 or MERGE was active (from r_err)
+err_cleanup:
+            jsr mv_swapout            ; does nothing unless MOVSPR was active
+            jmp mg_stop               ; does nothing unless MERGE was active
+
 ; stop sprites 9-24 (start-up, RUN/STOP + RESTORE)
 spr_stop:   lda #0
             ldx #175
@@ -2020,372 +2603,577 @@ tick:       jsr snd_irq
             jmp spr_irq
 
 ; =============================================================================
-;  RAM part, copied to $1800 at start-up (max. 1K)
+;  Stage 7: programming tools
+;    $hex and %binary numbers in expressions, MOD() and DIV()
+;    FIND "text"     list the lines that contain text
+;    MERGE "file"    add a program from disk to the one in memory
+;    DUMP            list the simple variables with their values
 ; =============================================================================
-code_end:
-            .assert code_end <= $D000, "code runs into the I/O area at $D000"
 
-; The RAM part is stored at $E000 ($D000-$DFFF is hidden by I/O).
-            .org $E000
-ramimage:
-            .rorg $1800
+; -----------------------------------------------------------------------------
+;  $hex / %binary number: called from r_eval with A = '$' or '%' just read.
+;  Leaves the value (0-65535) in the FAC and txtptr on the next character.
+; -----------------------------------------------------------------------------
+rom_literal:
+            sta lt_kind
+            lda #0
+            sta lt_val
+            sta lt_val+1
+            sta lt_cnt
+lt_next:    jsr s_chrget              ; (BASIC's CHRGET switches the memory map)
+            ldx lt_kind
+            cpx #'%'
+            beq lt_bin
+            cmp #'0'
+            bcc lt_end
+            cmp #'9'+1
+            bcc lt_dec
+            cmp #'A'
+            bcc lt_end
+            cmp #'F'+1
+            bcs lt_end
+            sbc #'A'-11               ; C=0: A-F -> 10-15
+            jmp lt_hex
+lt_dec:     and #$0F
+lt_hex:     ldx #4                    ; value = value * 16 + digit
+lt_h1:      asl lt_val
+            rol lt_val+1
+            bcs lt_ovf
+            dex
+            bne lt_h1
+            ora lt_val
+            sta lt_val
+            inc lt_cnt
+            bne lt_next
+lt_bin:     cmp #'0'
+            beq lt_b1
+            cmp #'1'
+            bne lt_end
+lt_b1:      lsr a                     ; C = bit
+            rol lt_val
+            rol lt_val+1
+            bcs lt_ovf
+            inc lt_cnt
+            bne lt_next
+lt_end:     lda lt_cnt
+            bne lt_ok
+            jmp s_snerr               ; '$' or '%' without digits
+lt_ovf:     jmp s_fcerr               ; more than 16 bits
+lt_ok:      lda #0
+            sta valtyp                ; numeric
+            sta intflg
+            ldy lt_val
+            lda lt_val+1
+            jmp s_nosflt
 
-; SYSCALL: call (sysvec) in the normal BASIC memory map (bank 15) through the
-; Kernal's JSRFAR, then switch back to the map that was active before.
-; JSRFAR's return code lives in common RAM, so this also works for BASIC
-; routines that return with RAM 1 switched in (FRMSTR, for example), where
-; this RAM at $1800 would be invisible. A/X/Y pass through in both
-; directions, flags are returned from the called routine.
-syscall:    sta tmpa
-            php
-            pla
-            sta fr_s                  ; flags for the call
-            lda mmucr
+; -----------------------------------------------------------------------------
+;  MOD(a, b) and DIV(a, b): remainder and quotient of a / b, 0-65535
+; -----------------------------------------------------------------------------
+do_mod:     lda #0
+            beq md_1
+do_div:     lda #1
+md_1:       sta md_kind
+            jsr s_getadr              ; a (pre-evaluated)
+            pha                       ; a and the kind stay on the stack while
+            tya                       ; b is evaluated (it may use MOD/DIV too)
             pha
-            lda #CFG_SYS
-            sta mmucr
-            lda #15                   ; bank 15: Kernal, BASIC, RAM 0, I/O
-            sta fr_bank
-            lda sysvec+1
-            sta fr_pchi
-            lda sysvec
-            sta fr_pclo
-            lda tmpa
-            sta fr_a
-            stx fr_x
-            sty fr_y
-            jsr jsrfar
-            pla
-            sta mmucr
-            ldx fr_x
-            ldy fr_y
-            lda fr_s
+            lda md_kind
             pha
-            lda fr_a
-            plp
+            jsr s_chkcom
+            jsr s_frmnum
+            jsr s_getadr              ; b
+            sty md_b
+            sta md_b+1
+            jsr s_chkcls
+            pla
+            sta md_kind
+            pla
+            sta md_a
+            pla
+            sta md_a+1
+            lda md_b
+            ora md_b+1
+            bne md_2
+            ldx #errdvo               ; ?DIVISION BY ZERO
+            jmp s_error
+md_2:       lda #0                    ; 16-bit division: md_a = quotient,
+            sta md_r                  ; md_r = remainder
+            sta md_r+1
+            ldx #16
+md_3:       asl md_a
+            rol md_a+1
+            rol md_r
+            rol md_r+1
+            lda md_r
+            sec
+            sbc md_b
+            tay
+            lda md_r+1
+            sbc md_b+1
+            bcc md_4
+            sta md_r+1
+            sty md_r
+            inc md_a
+md_4:       dex
+            bne md_3
+            lda md_kind
+            beq md_mod
+            ldy md_a
+            lda md_a+1
+            jmp s_nosflt
+md_mod:     ldy md_r
+            lda md_r+1
+            jmp s_nosflt
+
+; -----------------------------------------------------------------------------
+;  FIND "text" - list every line that contains text, either as typed
+;  (strings, REM) or tokenized (keywords).
+; -----------------------------------------------------------------------------
+do_find:    jsr s_chrget
+            jsr s_frmstr              ; A = length, (index1) in RAM 1
+            cmp #0
+            beq fd_fc
+            cmp #40
+            bcc fd_1
+fd_fc:      jmp s_fcerr
+fd_1:       sta fd_len
+            ldy #0                    ; pattern as typed -> savram
+fd_2:       sty fd_i
+            jsr s_indin1
+            ldy fd_i
+            sta savram,y
+            sta savram+41,y
+            iny
+            cpy fd_len
+            bne fd_2
+            lda #0
+            sta savram,y
+            sta savram+41,y
+            lda txtptr                ; tokenized copy at savram+41
+            pha
+            lda txtptr+1
+            pha
+            lda #<(savram+41)
+            sta txtptr
+            lda #>(savram+41)
+            sta txtptr+1
+            lda #<crunch
+            ldx #>crunch
+            jsr syscall_ax
+            pla
+            sta txtptr+1
+            pla
+            sta txtptr
+            ldy #0
+fd_3:       lda savram+41,y           ; length of the tokenized pattern
+            beq fd_4
+            iny
+            bne fd_3
+fd_4:       sty fd_len2
+
+            lda txttab                ; first line
+            sta fd_line
+            lda txttab+1
+            sta fd_line+1
+fd_line_lp: ldy #1                    ; end of program?
+            jsr fd_get
+            bne fd_5
+            jmp fd_done
+fd_5:       ldy #4                    ; search this line
+fd_6:       jsr fd_get
+            beq fd_next               ; end of line, not found
+            sty fd_i
+            ldx #0                    ; as typed
+fd_7:       lda savram,x
+            beq fd_hit
+            sta fd_c
+            jsr fd_get
+            cmp fd_c
+            bne fd_8
+            iny
+            inx
+            bne fd_7
+fd_8:       ldy fd_i
+            ldx fd_len2               ; tokenized
+            beq fd_10
+            ldx #0
+fd_9:       lda savram+41,x
+            beq fd_hit
+            sta fd_c
+            jsr fd_get
+            cmp fd_c
+            bne fd_10
+            iny
+            inx
+            bne fd_9
+fd_10:      ldy fd_i
+            iny
+            bne fd_6
+            beq fd_next
+
+fd_hit:     lda fd_line               ; list the line
+            sta lowtr
+            lda fd_line+1
+            sta lowtr+1
+            lda #<crdo
+            ldx #>crdo
+            jsr syscall_ax
+            ldy #2
+            jsr fd_get
+            tax                       ; line number: X = low, A = high
+            ldy #3
+            jsr fd_get
+            pha
+            lda #<p1line
+            sta sysvec
+            lda #>p1line
+            sta sysvec+1
+            pla
+            jsr syscall
+            lda #<stop
+            ldx #>stop
+            jsr syscall_ax
+            beq fd_done               ; STOP pressed
+
+fd_next:    ldy #0                    ; next line
+            jsr fd_get
+            tax
+            iny
+            jsr fd_get
+            stx fd_line
+            sta fd_line+1
+            jmp fd_line_lp
+fd_done:    lda #<crdo
+            ldx #>crdo
+            jsr syscall_ax
+            jmp s_chrgot
+
+; A = byte Y of the current line (RAM 0), Z set by the value; X kept
+fd_get:     stx fd_x
+            tya
+            clc
+            adc fd_line
+            sta peekaddr
+            lda fd_line+1
+            adc #0
+            sta peekaddr+1
+            cmp #$40                  ; below $4000: visible here
+            bcs fd_g1
+            sty fd_y
+            ldy #0
+            lda peekaddr
+            sta index2
+            lda peekaddr+1
+            sta index2+1
+            lda (index2),y
+            ldy fd_y
+            ldx fd_x
+            cmp #0
+            rts
+fd_g1:      jsr r_peek0               ; above: through RAM-only map
+            ldx fd_x
+            cmp #0
             rts
 
-; character out through the Kernal (used during start-up)
-r_chrout:   sta tmpa
-            lda #<chrout
+; -----------------------------------------------------------------------------
+;  DUMP - simple variables (not arrays) with their values
+; -----------------------------------------------------------------------------
+do_dump:    jsr s_chrget
+            lda vartab
+            sta dp_ptr
+            lda vartab+1
+            sta dp_ptr+1
+dp_loop:    lda dp_ptr                ; at the end of the variables?
+            cmp arytab
+            lda dp_ptr+1
+            sbc arytab+1
+            bcc dp_1
+            jmp s_chrgot
+dp_1:       lda dp_ptr                ; 7 bytes of the variable -> savram
+            sta index1
+            lda dp_ptr+1
+            sta index1+1
+            ldy #0
+dp_2:       sty fd_i
+            jsr s_indin1
+            ldy fd_i
+            sta savram,y
+            iny
+            cpy #7
+            bne dp_2
+            lda savram                ; type: bit 7 of both name characters
+            and savram+1
+            bmi dp_int
+            lda savram
+            bmi dp_next               ; DEF FN: skip
+            jsr dp_name
+            lda savram+1
+            bmi dp_str
+            lda #'='                  ; float
+            jsr s_chrout
+            lda #<(savram+2)
+            ldy #>(savram+2)
+            jsr s_movfm
+dp_num:     jsr s_fout
+            jsr s_strout
+            jmp dp_eol
+dp_int:     jsr dp_name
+            lda #'%'
+            jsr s_chrout
+            lda #'='
+            jsr s_chrout
+            lda savram+2              ; high byte first
+            ldy savram+3
+            jsr s_givayf
+            jmp dp_num
+dp_str:     lda #'$'
+            jsr s_chrout
+            lda #'='
+            jsr s_chrout
+            lda #'"'
+            jsr s_chrout
+            lda savram+3
+            sta index1
+            lda savram+4
+            sta index1+1
+            ldy #0
+dp_s1:      cpy savram+2
+            beq dp_s2
+            sty fd_i
+            jsr s_indin1
+            jsr s_chrout
+            ldy fd_i
+            iny
+            bne dp_s1
+dp_s2:      lda #'"'
+            jsr s_chrout
+dp_eol:     lda #13
+            jsr s_chrout
+            lda #<stop
+            ldx #>stop
+            jsr syscall_ax
+            bne dp_next
+            jmp s_chrgot              ; STOP pressed
+dp_next:    lda dp_ptr
+            clc
+            adc #7
+            sta dp_ptr
+            bcc dp_n1
+            inc dp_ptr+1
+dp_n1:      jmp dp_loop
+
+dp_name:    lda savram                ; one or two characters
+            and #$7F
+            jsr s_chrout
+            lda savram+1
+            and #$7F
+            beq dp_nm1
+            jsr s_chrout
+dp_nm1:     rts
+
+; -----------------------------------------------------------------------------
+;  MERGE "file" [, device] - direct mode only. Opens the file, then BASIC's
+;  main loop takes the lines one by one from r_merge instead of the keyboard
+;  and stores them as if typed (replacing lines with the same number).
+; -----------------------------------------------------------------------------
+MG_LFN      = 14
+
+do_merge:   lda curlin+1              ; direct mode only
+            cmp #$FF
+            beq mg_1
+            jmp s_fcerr
+mg_1:       jsr s_chrget
+            jsr s_frmstr              ; A = length, (index1) in RAM 1
+            sta tmpc
+            ldx #8                    ; device, default 8
+            jsr s_optbx
+            stx tmph
+            lda #0                    ; data bank 0, file name in bank 1
+            ldx #1
+            jsr k_setbnk
+            lda tmpc
+            ldx index1
+            ldy index1+1
+            jsr k_setnam
+            lda #MG_LFN
+            ldx tmph
+            ldy #0                    ; secondary address 0: read a program
+            jsr k_setlfs
+            jsr k_open
+            bcc mg_2
+            tax                       ; Kernal error = BASIC error number
+            jmp s_error
+mg_2:       ldx #MG_LFN
+            jsr k_chkin
+            jsr k_basin               ; load address, ignored
+            jsr k_basin
+            jsr k_readst
+            and #$BF                  ; anything but end of file?
+            beq mg_3
+            jsr mg_close
+            ldx #4                    ; ?FILE NOT FOUND
+            jmp s_error
+mg_3:       jsr k_clrchn
+            lda #1
+            sta merge_on
+            lda imain                 ; BASIC's main loop: lines from us
+            sta old_imain
+            lda imain+1
+            sta old_imain+1
+            lda #<r_merge
+            sta imain
+            lda #>r_merge
+            sta imain+1
+            lda ierror                ; errors while storing: stop merging
+            sta old_ierror
+            lda ierror+1
+            sta old_ierror+1
+            lda #<r_err
+            sta ierror
+            lda #>r_err
+            sta ierror+1
+            jmp s_chrgot
+
+; next line of the file into buf as "<number><tokenized text>":
+; C=0, X/Y = buf-1 for BASIC; C=1 at the end (everything restored)
+mg_next:    ldx #MG_LFN
+            jsr k_chkin
+            jsr k_basin               ; link
+            sta tmpc
+            jsr k_basin
+            ora tmpc
+            beq mg_end                ; $0000: end of program
+            jsr k_readst
+            and #$BF
+            bne mg_end                ; read error
+            jsr k_basin               ; line number
+            sta md_a
+            jsr k_basin
+            sta md_a+1
+            ldx #0                    ; as decimal digits
+            stx mg_lead
+            ldy #4
+mg_d1:      lda #0
+            sta tmpc                  ; digit
+mg_d2:      lda md_a
+            sec
+            sbc dec_lo,y
+            sta md_r
+            lda md_a+1
+            sbc dec_hi,y
+            bcc mg_d3
+            sta md_a+1
+            lda md_r
+            sta md_a
+            inc tmpc
+            bne mg_d2
+mg_d3:      lda tmpc
+            ora mg_lead
+            beq mg_d4                 ; no leading zeros
+            sta mg_lead
+            lda tmpc
+            ora #'0'
+            sta buf,x
+            inx
+mg_d4:      dey
+            bne mg_d1
+            lda md_a                  ; last digit (also for line 0)
+            ora #'0'
+            sta buf,x
+            inx
+mg_t1:      jsr k_basin               ; tokenized text up to the 0
+            cpx #159
+            bcs mg_t2                 ; too long: drop the rest
+            sta buf,x
+            inx
+mg_t2:      cmp #0
+            bne mg_t1
+            lda #0
+            sta buf,x
+            jsr k_clrchn
+            ldx #<(buf-1)
+            ldy #>(buf-1)
+            clc
+            rts
+mg_end:     jsr mg_stop
+            sec
+            rts
+
+dec_lo:     .byte <1, <10, <100, <1000, <10000
+dec_hi:     .byte >1, >10, >100, >1000, >10000
+
+; stop merging: close the file, give BASIC its main loop and errors back
+mg_stop:    lda merge_on
+            beq mg_s1
+            lda #0
+            sta merge_on
+            lda old_imain
+            sta imain
+            lda old_imain+1
+            sta imain+1
+            lda old_ierror
+            sta ierror
+            lda old_ierror+1
+            sta ierror+1
+mg_close:   jsr k_clrchn
+            lda #MG_LFN
+            jsr k_close
+mg_s1:      rts
+
+; Kernal calls
+k_setbnk:   pha
+            lda #<$FF68
             sta sysvec
-            lda #>chrout
+            lda #>$FF68
             sta sysvec+1
-            lda tmpa
+            pla
+            jmp syscall
+k_setnam:   pha
+            lda #<$FFBD
+            sta sysvec
+            lda #>$FFBD
+            sta sysvec+1
+            pla
+            jmp syscall
+k_setlfs:   pha
+            lda #<$FFBA
+            sta sysvec
+            lda #>$FFBA
+            sta sysvec+1
+            pla
+            jmp syscall
+k_open:     lda #<$FFC0
+            ldx #>$FFC0
+            jmp syscall_ax
+k_chkin:    lda #<$FFC6               ; X = file
+            sta sysvec
+            lda #>$FFC6
+            sta sysvec+1
+            jmp syscall
+k_basin:    lda #<$FFCF
+            sta sysvec
+            lda #>$FFCF
+            sta sysvec+1
+            jmp syscall
+k_readst:   lda #<$FFB7
+            sta sysvec
+            lda #>$FFB7
+            sta sysvec+1
+            jmp syscall
+k_clrchn:   lda #<$FFCC
+            sta sysvec
+            lda #>$FFCC
+            sta sysvec+1
+            jmp syscall
+k_close:    pha                       ; A = file
+            lda #<$FFC3
+            sta sysvec
+            lda #>$FFC3
+            sta sysvec+1
+            pla
             jmp syscall
 
-; store A at pokeaddr in RAM bank 0, even under ROM or I/O
-; (pokeaddr is the operand of the STA below)
-r_poke0:    ldx mmucr
-            stx savcfg2
-            ldx #$3F                  ; RAM 0 only
-            stx mmucr
-r_pokesta:  sta $FFFF
-            ldx savcfg2
-            stx mmucr
-            rts
-pokeaddr = r_pokesta+1
-
-; A = byte at peekaddr in RAM bank 0, even under ROM or I/O
-r_peek0:    ldx mmucr
-            stx savcfg2
-            ldx #$3F                  ; RAM 0 only
-            stx mmucr
-r_peeklda:  lda $FFFF
-            ldx savcfg2
-            stx mmucr
-            rts
-peekaddr = r_peeklda+1
-
-; --- tokenizer hook ------------------------------------------------------------
-r_crunch:   bcc rc_pass               ; already claimed by someone else
-            pha
-            lda mmucr
-            sta savcfg
-            lda #CFG_71
-            sta mmucr
-            pla
-            jsr rom_crunch
-            php
-            pha
-            lda savcfg
-            sta mmucr
-            pla
-            plp
-rc_pass:    jmp (old_clk)
-
-; --- LIST hook: X = 0 statement / $FF function, A = second token -------------
-r_list:     bcc rl_pass
-            cpx #0
-            bne rl_fn
-            cmp #CMD_FIRST
-            bcc rl_pass
-            cmp #CMD_LAST+1
-            bcs rl_pass
-            sbc #CMD_FIRST-1          ; C=0 here: subtract CMD_FIRST
-            tay
-            lda cmdname_lo,y
-            sta index1
-            lda cmdname_hi,y
-            sta index1+1
-            clc                       ; claimed
-            jmp (old_lst)
-rl_fn:      cmp #FN_FIRST
-            bcc rl_pass
-            cmp #FN_LAST+1
-            bcs rl_pass
-            sbc #FN_FIRST-1
-            tay
-            lda fnname_lo,y
-            sta index1
-            lda fnname_hi,y
-            sta index1+1
-            clc
-rl_pass:    jmp (old_lst)
-
-; --- statement hook: A = second token, C = 1 -----------------------------------
-r_exec:     bcc re_pass
-            cmp #CMD_FIRST
-            bcc re_pass
-            cmp #CMD_LAST+1
-            bcs re_pass
-            tax
-            lda mmucr
-            pha
-            lda #CFG_71
-            sta mmucr
-            txa
-            jsr rom_exec
-            pla
-            sta mmucr
-            rts                       ; back to BASIC's statement loop
-re_pass:    sec
-            jmp (old_exe)
-
-; --- function hook: A = second token, C = 1, FAC = argument --------------------
-r_fn:       bcc rf_pass
-            cmp #FN_FIRST
-            bcc rf_pass
-            cmp #FN_LAST+1
-            bcs rf_pass
-            tax
-            lda mmucr
-            pha
-            lda #CFG_71
-            sta mmucr
-            txa
-            jsr rom_fn
-            pla
-            sta mmucr
-            clc                       ; claimed, result in FAC
-            rts
-rf_pass:    sec
-            jmp (old_fn)
-
-; --- keyword names for LIST (must be in RAM 0) ---------------------------------
-cmdname_lo: .byte <nm_palette, <nm_sprite, <nm_sprptr, <nm_sound, <nm_play, <nm_vol, <nm_filter, <nm_sid6, <nm_movspr, <nm_sprsav
-cmdname_hi: .byte >nm_palette, >nm_sprite, >nm_sprptr, >nm_sound, >nm_play, >nm_vol, >nm_filter, >nm_sid6, >nm_movspr, >nm_sprsav
-fnname_lo:  .byte <nm_rpalette, <nm_rsprite, <nm_rsppos, <nm_bump
-fnname_hi:  .byte >nm_rpalette, >nm_rsprite, >nm_rsppos, >nm_bump
-nm_palette: .byte "PALETT", 'E'+$80
-nm_rpalette: .byte "RPALETT", 'E'+$80
-nm_sprite:  .byte "SPRIT", 'E'+$80
-nm_sprptr:  .byte "SPRPT", 'R'+$80
-nm_sound:   .byte "SOUN", 'D'+$80
-nm_play:    .byte "PLA", 'Y'+$80
-nm_vol:     .byte "VO", 'L'+$80
-nm_filter:  .byte "FILTE", 'R'+$80
-nm_sid6:    .byte "SID", '6'+$80
-nm_movspr:  .byte "MOVSP", 'R'+$80
-nm_sprsav:  .byte "SPRSA", 'V'+$80
-nm_rsprite: .byte "RSPRIT", 'E'+$80
-nm_rsppos:  .byte "RSPPO", 'S'+$80
-nm_bump:    .byte "BUM", 'P'+$80
-
-; --- six-voice sound: IRQ hook ---------------------------------------------------
-; Runs before the Kernal's IRQ handler (normal memory map). The music is
-; advanced once per jiffy clock tick, so it keeps BASIC's 60/50 Hz rate even
-; when the screen editor uses extra raster interrupts for split screens.
-r_irq:      lda vicx_key              ; collisions of sprites 9-24: collect them
-            cmp #$FE                  ; before BASIC reads $D01E/$D01F, which
-            bne ri_tick               ; clears all 24 bits
-            lda $D056
-            ora col9
-            sta col9
-            lda $D057
-            ora col9+1
-            sta col9+1
-            lda $D096
-            ora col9+2
-            sta col9+2
-            lda $D097
-            ora col9+3
-            sta col9+3
-ri_tick:    lda jiffy
-            cmp lastjif
-            beq ri_out
-            sta lastjif
-            lda irqbusy
-            bne ri_out
-            inc irqbusy
-            lda mmucr
-            pha
-            lda #CFG_71
-            sta mmucr
-            jsr tick
-            pla
-            sta mmucr
-            dec irqbusy
-ri_out:     jmp (old_irq)
-
-; --- RUN/STOP + RESTORE: the Kernal resets the IRQ vector, then warm starts ---------
-r_warm:     sei
-            lda cinv
-            sta old_irq
-            lda cinv+1
-            sta old_irq+1
-            lda #<r_irq
-            sta cinv
-            lda #>r_irq
-            sta cinv+1
-            lda #0
-            sta irqbusy
-            lda #CFG_71
-            sta mmucr
-            jsr snd_init
-            jsr spr_stop
-            lda #CFG_SYS
-            sta mmucr
-            jmp (old_sysvec)
-
-; --- error during MOVSPR for sprites 9-24: undo the swap, then BASIC's handler ---
-r_moverr:   stx mv_errx
-            php
-            sei
-            lda mmucr
-            pha
-            lda #CFG_71
-            sta mmucr
-            jsr mv_swapout            ; also puts BASIC's error vector back
-            pla
-            sta mmucr
-            plp
-            ldx mv_errx
-            jmp (ierror)
-
-; --- variables -----------------------------------------------------------------
-; Vectors used with JMP (ind) must not start at $xxFF (the 6502 would read
-; the high byte from $xx00), so they start on an even address.
-            .fill * & 1, 0
-old_clk:    .word 0
-old_lst:    .word 0
-old_exe:    .word 0
-old_fn:     .word 0
-sysvec:     .word 0
-savtxt:     .word 0
-savcfg:     .byte 0
-tmpa:       .byte 0
-tmpp:       .byte 0
-tmpx:       .byte 0
-tmpc:       .byte 0
-tmph:       .byte 0
-tmpv:       .byte 0
-savcfg2:    .byte 0
-spr_n:      .byte 0
-spr_i:      .byte 0
-spr_mask:   .byte 0
-spr_reg:    .byte 0
-spr_blk:    .byte 0
-
-; six-voice sound
-            .fill * & 1, 0
-old_irq:    .word 0
-old_sysvec: .word 0
-lastjif:    .byte 0
-irqbusy:    .byte 0
-s6_on:      .byte 0                   ; SID6 ON/OFF: keywords taken over when typed
-snd_v:      .byte 0
-p_len:      .byte 0
-p_pos:      .byte 0
-p_flag:     .byte 0
-p_sharp:    .byte 0
-p_dnote:    .byte 0
-p_voice:    .byte 0                   ; PLAY's current voice 0-5
-f_flg:      .byte 0
-f_sav:      .byte 0, 0, 0, 0
-; SOUND parameters, in this order (see do_sound)
-t_max_lo:   .byte 0
-t_max_hi:   .byte 0
-t_min_lo:   .byte 0
-t_min_hi:   .byte 0
-t_dir:      .byte 0
-t_step_lo:  .byte 0
-t_step_hi:  .byte 0
-t_freq_lo:  .byte 0
-t_freq_hi:  .byte 0
-t_pw_lo:    .byte 0
-t_pw_hi:    .byte 0
-t_wave:     .byte 0
-t_time_lo:  .byte 0
-t_time_hi:  .byte 0
-; per voice, 6 each; s_max_lo..s_freq_hi must stay in this order
-s_max_lo:   .fill 6, 0
-s_max_hi:   .fill 6, 0
-s_min_lo:   .fill 6, 0
-s_min_hi:   .fill 6, 0
-s_dir:      .fill 6, 0
-s_step_lo:  .fill 6, 0
-s_step_hi:  .fill 6, 0
-s_freq_lo:  .fill 6, 0
-s_freq_hi:  .fill 6, 0
-s_time_lo:  .fill 6, 0
-s_time_hi:  .fill 6, $FF
-m_voices:   .fill 12, $FF             ; PLAY note counters, 2 per voice
-m_wave:     .fill 6, 0                ; PLAY waveform per voice
-; sprites 9-24 (stage 4)
-m_data:     .fill 176, 0              ; motion records, 11 bytes per sprite (as BASIC)
-mv_save:    .fill 14, 0               ; BASIC slot saved during MOVSPR 9-24
-mv_n:       .byte 0
-mv_k:       .byte 0
-mv_bit:     .byte 0
-mv_mi:      .byte 0
-mv_base:    .byte 0
-mv_reg:     .byte 0
-mv_tmp:     .byte 0
-mv_active:  .byte 0
-mv_errx:    .byte 0
-old_ierror: .word 0
-col9:       .fill 4, 0                ; BUMP 3-6: collisions of sprites 9-24
-fn_n:       .byte 0
-fn_a:       .byte 0
-fn_bit:     .byte 0
-fn_base:    .byte 0
-fn_x:       .byte 0
-fn_y:       .byte 0
-fn_msb:     .byte 0
-fn_spd:     .byte 0
-sm_i:       .byte 0
-sm_bit:     .byte 0
-sm_base:    .byte 0
-sm_y:       .byte 0
-tmpa2:      .byte 0
-sv_adr:     .word 0                   ; SPRSAV
-sv_y:       .byte 0
-vbank:      .byte 0
-fil6:       .fill 10, 0               ; filter/volume, 5 bytes per SID:
-                                      ; +0/+1 cut-off, +2 resonance/routing,
-                                      ; +3 type/volume, +4 current type/volume
-ram_end:
-            .assert (old_clk & $FF) != $FF, "vector old_clk at $xxFF"
-            .assert (old_lst & $FF) != $FF, "vector old_lst at $xxFF"
-            .assert (old_exe & $FF) != $FF, "vector old_exe at $xxFF"
-            .assert (old_fn & $FF) != $FF, "vector old_fn at $xxFF"
-            .assert (sysvec & $FF) != $FF, "vector sysvec at $xxFF"
-            .assert (old_irq & $FF) != $FF, "vector old_irq at $xxFF"
-            .assert (old_sysvec & $FF) != $FF, "vector old_sysvec at $xxFF"
-            .assert ram_end <= $1C00, "RAM part larger than 1K"
-            .rend
-            .assert * < $FF05, "RAM image runs into the interrupt code at $FF05"
+            .assert * < $FF05, "code runs into the interrupt code at $FF05"
 
 ; =============================================================================
 ;  Interrupt code, byte-identical to the Kernal at $FF05-$FF41.

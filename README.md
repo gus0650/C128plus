@@ -25,6 +25,8 @@ See [docs/VIC-IIx.md](docs/VIC-IIx.md) for the VIC-IIx registers, and BASIC test
 
 See [docs/BASIC71-Graphics.md](docs/BASIC71-Graphics.md) for the BASIC 7.1 graphics commands (`SPRITE`, `MOVSPR`, `RSPRITE`, `RSPPOS` and `BUMP` for 24 sprites, `SPRPTR`, `PALETTE`, `RPALETTE`) and test programs.
 
+See [docs/BASIC71-Tools.md](docs/BASIC71-Tools.md) for the BASIC 7.1 programming tools: `$hex`/`%binary` numbers, `MOD()`, `DIV()`, `FIND`, `MERGE` and `DUMP`.
+
 See [docs/BASIC71-Sound.md](docs/BASIC71-Sound.md) for six-voice sound with both SIDs (BASIC 7.1 `SOUND`, `PLAY`, `VOL`, `FILTER`) and a test program.
 
 ROMs:
