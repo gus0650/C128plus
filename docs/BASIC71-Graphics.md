@@ -362,6 +362,16 @@ DLOAD "SPRTEST"
 RUN
 ```
 
+`basic71/test/colltest.prg` (source: `colltest.bas`, also on
+`colltest.d64`) tests collision detection for all three groups:
+
+1. sprite-sprite: sprites 1+2, 9+10 and 17+18 overlap in turn; `BUMP(1)`,
+   `BUMP(3)` and `BUMP(5)` each print 3
+2. sprite-screen: sprites 1, 9 and 17 over a solid block of text; `BUMP(2)`,
+   `BUMP(4)` and `BUMP(6)` each print 1
+3. `COLLISION 1`: sprite 18 moves into sprite 17; the `GOSUB` runs and
+   `BUMP(5)` prints 3
+
 If a program stops at line 30 with "VIC-IIX LOCKED", BASIC 7.1 isn't
 installed or the VIC-IIx was locked.
 
