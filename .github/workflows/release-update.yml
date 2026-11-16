@@ -1,0 +1,26 @@
+name: Update release files
+
+# Replaces BASIC 7.1 and the test programs in an existing release with the
+# versions on main, and refreshes its notes. The core file stays as it is.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag, e.g. v0.8'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Upload files and notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ inputs.tag }}" basic71/boot2.rom basic71/test/*.prg --clobber
+          notes=".github/release-notes/${{ inputs.tag }}.md"
+          if [ -f "$notes" ]; then gh release edit "${{ inputs.tag }}" --notes-file "$notes"; fi
