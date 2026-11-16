@@ -23,13 +23,18 @@ SPRITE 9,1:POKE $D051,PEEK($D051) OR %00000011
 A=$FF+1                      : REM 256
 ```
 
-- Values are 0–65535 (`$0`–`$FFFF`, up to 16 binary digits). A larger value
-  gives `?ILLEGAL QUANTITY ERROR`, `$` or `%` without digits gives
-  `?SYNTAX ERROR`.
+- Values are 0–65535 (`$0`–`$FFFF`, up to 16 binary digits). A larger value,
+  or `$`/`%` without digits, gives `?SYNTAX ERROR`.
 - They work in expressions, in direct mode and in programs, and `LIST` shows
-  them as typed. A minus sign works as usual: `-$10` is −16.
-- They don't work in `DATA` lines or for `INPUT`: BASIC reads those numbers
-  with its own routine.
+  them as typed, leading zeros included. A minus sign works as usual: `-$10`
+  is −16.
+- They cost no speed: BASIC 7.1 converts them when you type the line, so a
+  running program evaluates them like any other number.
+- In memory each number takes a few bytes more than typed (`$D040` takes 11
+  bytes instead of 5). If a long line would no longer fit into BASIC's
+  160-character line, the number is left as typed and gives `?SYNTAX ERROR`.
+- They don't work in `DATA` lines or for `INPUT`, and `FIND` can't search for
+  them.
 - `$` after a letter or digit is still a string variable: `A$`, `X1$`.
 - Leave a space between a hex number and a keyword that starts with A–F,
   otherwise the letters are read as hex digits: `IF X=$FF AND Y` rather
@@ -118,8 +123,6 @@ certain point while debugging.
   the keyword plus a letter. Programs loaded from disk are not affected.
 - Programs that use these keywords or `$`/`%` numbers need the C128+ with
   BASIC 7.1. On a normal C128, those lines stop with `?SYNTAX ERROR`.
-- The `$`/`%` numbers cost BASIC a little time on every number and variable
-  it evaluates: about 4% in a loop full of arithmetic.
 
 ## Test program
 
@@ -142,11 +145,11 @@ the C128 simulator; for `MERGE` it uses a pretend disk drive.
 
 ## How it works
 
-- **`$`/`%` numbers:** BASIC 7.1 hooks BASIC's term evaluation vector
-  (`$030A`). When a term starts with `$` or `%`, it reads the digits and puts
-  the value into BASIC's floating point accumulator; otherwise BASIC carries
-  on as usual. The tokenizer hook leaves the digits after `$` alone, so that
-  `$DEC0` doesn't turn into the keyword `DEC`.
+- **`$`/`%` numbers:** when you type a line, BASIC 7.1's tokenizer hook
+  replaces `$D040` with a BASIC 7.1 function token followed by `(4,53312)`:
+  the number of digits as typed and the value in decimal. BASIC evaluates
+  that with its own number routine, so nothing slows down elsewhere. `LIST`
+  turns it back into `$D040`. Tokens: `$CE $46` (hex), `$CE $47` (binary).
 - **`MERGE`:** BASIC 7.1 opens the file, then points BASIC's main loop
   (`$0302`) at itself. For each line in the file it hands BASIC the line
   number and the tokenized text, and BASIC stores it with its own code,

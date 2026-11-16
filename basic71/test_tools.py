@@ -58,7 +58,12 @@ def main():
     scr = do(m, 'BANK 15:POKE $1300,%10101011:PRINT PEEK($1300)')
     check('POKE/PEEK with $ and %', ' 171' in scr, scr)
     scr = do(m, 'PRINT $10000')
-    check('$10000 is ILLEGAL QUANTITY', 'ILLEGAL QUANTITY' in scr, scr)
+    check('$10000 (too big) is SYNTAX', 'SYNTAX' in scr, scr)
+    m.type('NEW\r20 A%=%11:B=$00FF+%00000101+$0+%1111111111111111:PRINT A%;B\rLIST\r'); m.run(250000)
+    check('LIST keeps leading zeros and long binary numbers',
+          m.screen().replace('\n', '').count('20 A%=%11:B=$00FF+%00000101+$0+%1111111111111111:PRINT A%;B') == 2, m.screen())
+    scr = do(m, 'RUN')
+    check('RUN: A%=3, B=65795', ' 3  65795' in scr, scr)
     scr = do(m, 'PRINT $G')
     check('$ without digits is SYNTAX', 'SYNTAX' in scr, scr)
     scr = do(m, 'A$="X":B%=7:PRINT A$CHR$(65);B%')

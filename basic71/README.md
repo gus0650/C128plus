@@ -73,7 +73,7 @@ Inside, BASIC 7.1 has its own sound engine for all six voices, with the same alg
 - **New keywords:** BASIC 7.1 hooks BASIC 7.0's escape-token vectors for tokenizing (`$030C`), listing (`$030E`) and executing statements (`$0310`) and functions (`$02FC`). BASIC 7.1 statements are `$FE $40` and up, functions `$CE $40` and up, above BASIC's own escape tokens.
 - **Running BASIC 7.1 code:** while BASIC 7.1 code runs, the MMU maps the BASIC 7.1 ROM at `$C000` with both BASIC ROMs and I/O visible (configuration `$10`). The Kernal is not visible then, and BASIC switches the memory map while it reads variables. So every call into BASIC or the Kernal goes through a small routine in RAM that calls it with the Kernal's `JSRFAR` in the normal BASIC map. `JSRFAR` returns through common RAM, so this also works for BASIC routines that return with RAM bank 1 switched in.
 - **Interrupts:** the interrupt entry and exit code at `$FF05–$FF41` is byte-identical to the Kernal's, because the CPU continues in the other copy at the same address when the map changes.
-- **RAM:** BASIC 7.1 uses `$1800–$1BFF` (983 bytes so far, of 1024), part of the 1K that the C128 Kernal reserves for function ROM software. It also uses the Kernal's `JSRFAR` parameters at `$02–$08`, which BASIC itself only uses for `SYS`.
+- **RAM:** BASIC 7.1 uses `$1800–$1BFF` (990 bytes so far, of 1024), part of the 1K that the C128 Kernal reserves for function ROM software. It also uses the Kernal's `JSRFAR` parameters at `$02–$08`, which BASIC itself only uses for `SYS`.
 
 ## Building and testing
 
