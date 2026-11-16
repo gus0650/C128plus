@@ -37,8 +37,9 @@ assembler (`bsoasm.py`):
 
 The new code is 641 bytes long and sits in free ROM space after the machine
 language monitor, at $BB72–$BDF2 (461 bytes are still free). The six-voice
-tables live in RAM at $1B80–$1BDE, at the top of the function-key area. BASIC
-7.1 uses $1800–$1B7F.
+tables live in RAM at $1B80–$1BDE, at the top of the function-key area. This
+ROM patch can't be used together with BASIC 7.1, which needs the whole area
+and has six-voice sound of its own.
 
 ```
 git clone https://github.com/mist64/cbmsrc

@@ -367,7 +367,7 @@ def test_crunch_sprite():
     assert crunch(m, 'SPRITE 10,1')[1:5] == (0x41, 0x00, 5, 0)
     assert crunch(m, 'SPRPTR 10,200')[1:5] == (0x42, 0x00, 5, 0)
     assert crunch(m, 'SPRDEF')[4] == 1                               # BASIC's own keyword
-    assert crunch(m, 'SPRSAV 1,A$')[4] == 1
+    assert crunch(m, 'SPRSAV 1,A$')[1:5] == (0x49, 0x00, 5, 0)              # now BASIC 7.1's
 
 def test_sprite():
     m = fresh(); v = m.mem.vic

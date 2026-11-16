@@ -7,7 +7,7 @@
 ;
 ;  Stage 1-3: start-up line, VIC-IIx unlock, PALETTE, RPALETTE(),
 ;              SPRITE for sprites 1-24, SPRPTR
-;  Stage 4:   MOVSPR, RSPRITE(), RSPPOS(), BUMP() for sprites 1-24
+;  Stage 4:   MOVSPR, RSPRITE(), RSPPOS(), BUMP(), SPRSAV for sprites 1-24
 ;  Stage 6:   six-voice sound with the second SID at $D420: SOUND, PLAY,
 ;              VOL and FILTER for voices 1-6, SID6 ON/OFF
 ;
@@ -17,9 +17,9 @@
 ;  The Kernal is not visible, and BASIC switches the memory map while it
 ;  reads variables, so every call into BASIC/Kernal goes through SYSCALL
 ;  (RAM), which switches to the normal BASIC map for the duration of the call.
-;  RAM used: $1800-$1B7F ("reserved for function key software applications"
-;  in the C128 Kernal source). $1B80-$1BFF belongs to the six-voice BASIC
-;  in basic70/boot0.rom.
+;  RAM used: $1800-$1BFF ("reserved for function key software applications"
+;  in the C128 Kernal source). Not compatible with the six-voice BASIC ROM
+;  patch in basic70/, which uses $1B80-$1BFF.
 ; =============================================================================
 
 ; ---- system addresses (C128 BASIC 7.0 / Kernal) ----------------------------
@@ -89,6 +89,20 @@ sprite_data = $117E     ; BASIC's motion records, 11 bytes per sprite
 irq_wrap_flag = $12FD   ; non-zero: BASIC's IRQ code does nothing
 nosflt     = $84C9      ; Y low, A high -> FAC (unsigned)
 chkcom     = $795C      ; check for ','
+frmevl     = $77EF      ; evaluate expression (valtyp: bit 7 = string)
+valtyp     = $0F
+desc_free  = $7799      ; free temp string: X = length, A/Y = address (RAM 1), C=1
+strlit_1   = $86CC      ; A = length, (strng1) -> new string
+ptrget     = $7AAF      ; variable at txtptr -> A/Y = its address
+inpcom     = $5405      ; assign string (facmo) to variable (forpnt), as LET
+strng1     = $70
+forpnt     = $4B
+facmo      = $66
+savram     = $12B7      ; BASIC's sprite save buffer
+savsiz     = $03DB      ; 3-byte string descriptor
+sprtmp_1   = $03E0
+sprtmp_2   = $03E1
+sprite_base = $0E00     ; shapes of sprites 1-8 (blocks 56-63)
 ierror     = $0300      ; BASIC error vector (error number in X)
 
 ; ---- SIDs -----------------------------------------------------------------------
@@ -118,12 +132,13 @@ TK_VOL      = $45       ; $FE $45
 TK_FILTER   = $46       ; $FE $46
 TK_SID6     = $47       ; $FE $47
 TK_MOVSPR   = $48       ; $FE $48  (replaces BASIC's own MOVSPR when typed with BASIC 7.1)
+TK_SPRSAV   = $49       ; $FE $49  (replaces BASIC's own SPRSAV)
 FN_RPALETTE = $40       ; $CE $40
 FN_RSPRITE  = $41       ; $CE $41  (replace BASIC's RSPRITE, RSPPOS, BUMP)
 FN_RSPPOS   = $42       ; $CE $42
 FN_BUMP     = $43       ; $CE $43
 CMD_FIRST   = $40
-CMD_LAST    = $48
+CMD_LAST    = $49
 FN_FIRST    = $40
 FN_LAST     = $43
 
@@ -153,11 +168,9 @@ cs_copy:    lda ramimage,x
             sta $1900,x
             lda ramimage+$200,x
             sta $1A00,x
-            cpx #$80                  ; last page only up to $1B7F
-            bcs cs_copy2
             lda ramimage+$300,x
             sta $1B00,x
-cs_copy2:   inx
+            inx
             bne cs_copy
 
             ; chain into the BASIC escape hooks
@@ -283,6 +296,25 @@ s_optbx:    lda #<optbyt              ; as s_optbyt, but X (the default) passes 
             lda #>optbyt
             sta sysvec+1
             jmp syscall
+s_frmevl:   lda #<frmevl
+            ldx #>frmevl
+            jmp syscall_ax
+s_descfree: lda #<desc_free
+            ldx #>desc_free
+            jmp syscall_ax
+s_ptrget:   lda #<ptrget
+            ldx #>ptrget
+            jmp syscall_ax
+s_inpcom:   lda #<inpcom
+            ldx #>inpcom
+            jmp syscall_ax
+s_strlit:   sta tmpa2                 ; A = length
+            lda #<strlit_1
+            sta sysvec
+            lda #>strlit_1
+            sta sysvec+1
+            lda tmpa2
+            jmp syscall
 s_chkcom:   lda #<chkcom
             ldx #>chkcom
             jmp syscall_ax
@@ -379,6 +411,7 @@ kwtab:      .byte "RPALETT", 'E'+$80, FN_RPALETTE, $FF
             .byte "FILTE",   'R'+$80, TK_FILTER,   $00
             .byte "SID",     '6'+$80, TK_SID6,     $00
             .byte "MOVSP",   'R'+$80, TK_MOVSPR,   $00
+            .byte "SPRSA",   'V'+$80, TK_SPRSAV,   $00
             .byte "RSPRIT",  'E'+$80, FN_RSPRITE,  $FF
             .byte "RSPPO",   'S'+$80, FN_RSPPOS,   $FF
             .byte "BUM",     'P'+$80, FN_BUMP,     $FF
@@ -413,8 +446,11 @@ ex_7:       cmp #TK_SID6
             bne ex_8
             jmp do_sid6
 ex_8:       cmp #TK_MOVSPR
-            bne ex_bad
+            bne ex_9
             jmp do_movspr
+ex_9:       cmp #TK_SPRSAV
+            bne ex_bad
+            jmp do_sprsav
 ex_bad:     jmp s_snerr
 
 ; the extensions must be unlocked before BASIC 7.1 touches $D040-$D0FF, otherwise
@@ -644,7 +680,13 @@ do_sprptr:  jsr spr_number
             stx tmpc                  ; group
             jsr s_combyt
             stx spr_blk
+            jsr ptr_where
+            lda spr_blk
+            jmp r_poke0
 
+; address of the pointer of sprite (group tmpc, number spr_i) -> pokeaddr;
+; vbank = VIC bank * $40 (high byte of the bank's start)
+ptr_where:
             ; low byte: $F8 - 8 * group + sprite in group
             lda tmpc
             asl a
@@ -680,9 +722,150 @@ pp_bank:    sta tmph
             lsr a                     ; bank * $40
             ror a
             ror a
+            sta vbank
             ora tmph
             sta pokeaddr+1
-            lda spr_blk
+            rts
+
+; -----------------------------------------------------------------------------
+;  SPRSAV src, dst   - as BASIC 7.0: src and dst are a sprite (1-24) or a
+;  string. Sprites 1-8 use BASIC's sprite area (blocks 56-63) as in BASIC
+;  7.0; sprites 9-24 use the block their pointer selects (SPRPTR).
+; -----------------------------------------------------------------------------
+do_sprsav:  jsr s_chrget
+            jsr sv_inp
+            bcs sv_10                 ; source is a string
+            sta sv_adr                ; source is a sprite: 63 bytes + sizes
+            sty sv_adr+1              ; as a 67-byte string, like BASIC 7.0
+            ldy #62
+sv_1:       jsr sv_peek
+            sta savram,y
+            dey
+            bpl sv_1
+            iny
+            sty savram+64             ; column length
+            sty savram+66             ; row length
+            lda #23
+            sta savram+63
+            lda #20
+            sta savram+65
+            lda #<savram
+            sta strng1
+            lda #>savram
+            sta strng1+1
+            lda #67
+            jsr s_strlit              ; new string from savram
+            jsr s_descfree            ; X = length, A/Y = address
+sv_10:      stx savsiz                ; source descriptor
+            sta savsiz+1
+            sty savsiz+2
+            jsr s_chkcom
+            lda txtptr                ; for a string destination
+            sta sprtmp_1
+            lda txtptr+1
+            sta sprtmp_2
+            jsr sv_inp
+            bcs sv_50                 ; destination is a string
+            sta sv_adr                ; destination is a sprite
+            sty sv_adr+1
+            lda savsiz+1
+            sta index1
+            lda savsiz+2
+            sta index1+1
+            ldy #0
+sv_40:      cpy savsiz                ; until the source ends ...
+            beq sv_45
+            sty sv_y
+            jsr s_indin1              ; source byte from RAM 1
+            ldy sv_y
+            jsr sv_poke
+            ldy sv_y
+            iny
+            cpy #63                   ; ... or 63 bytes are done
+            bne sv_40
+sv_45:      rts
+sv_50:      lda sprtmp_1              ; string destination: as LET
+            sta txtptr
+            lda sprtmp_2
+            sta txtptr+1
+            jsr s_ptrget
+            sta forpnt
+            sty forpnt+1
+            lda #<savsiz
+            sta facmo
+            lda #>savsiz
+            sta facmo+1
+            jmp s_inpcom
+
+; one SPRSAV argument: C=1 string (X = length, A/Y = address in RAM 1),
+; C=0 sprite (A/Y = address of its shape in RAM 0)
+sv_inp:     jsr s_frmevl
+            bit valtyp
+            bpl sv_num
+            jmp s_descfree
+sv_num:     jsr s_conint
+            dex
+            cpx #24
+            bcs sv_fc
+            cpx #8
+            bcs sv_ext
+            txa                       ; sprites 1-8: $0E00 + 64 * (n-1)
+            lsr a
+            ror a
+            ror a
+            ldy #>sprite_base
+            bcc sv_i1
+            iny
+sv_i1:      clc
+            rts
+sv_fc:      jmp s_fcerr
+sv_ext:     jsr chk_unlocked          ; sprites 9-24: the block of its pointer
+            txa
+            and #7
+            sta spr_i
+            txa
+            lsr a
+            lsr a
+            lsr a
+            sta tmpc
+            jsr ptr_where
+            lda pokeaddr
+            sta peekaddr
+            lda pokeaddr+1
+            sta peekaddr+1
+            jsr r_peek0               ; A = block
+            sta tmph
+            lsr a                     ; address = bank + block * 64
+            lsr a
+            ora vbank
+            tay
+            lda tmph
+            asl a
+            asl a
+            asl a
+            asl a
+            asl a
+            asl a
+            clc
+            rts
+
+sv_peek:    tya                       ; A = RAM 0 byte at sv_adr + Y
+            clc
+            adc sv_adr
+            sta peekaddr
+            lda sv_adr+1
+            adc #0
+            sta peekaddr+1
+            jmp r_peek0
+sv_poke:    pha                       ; store A in RAM 0 at sv_adr + Y
+            tya
+            clc
+            adc sv_adr
+            sta pokeaddr
+            lda sv_adr+1
+            adc #0
+            sta pokeaddr+1
+            pla
             jmp r_poke0
 
 ; =============================================================================
@@ -1903,6 +2086,17 @@ r_pokesta:  sta $FFFF
             rts
 pokeaddr = r_pokesta+1
 
+; A = byte at peekaddr in RAM bank 0, even under ROM or I/O
+r_peek0:    ldx mmucr
+            stx savcfg2
+            ldx #$3F                  ; RAM 0 only
+            stx mmucr
+r_peeklda:  lda $FFFF
+            ldx savcfg2
+            stx mmucr
+            rts
+peekaddr = r_peeklda+1
+
 ; --- tokenizer hook ------------------------------------------------------------
 r_crunch:   bcc rc_pass               ; already claimed by someone else
             pha
@@ -1989,8 +2183,8 @@ rf_pass:    sec
             jmp (old_fn)
 
 ; --- keyword names for LIST (must be in RAM 0) ---------------------------------
-cmdname_lo: .byte <nm_palette, <nm_sprite, <nm_sprptr, <nm_sound, <nm_play, <nm_vol, <nm_filter, <nm_sid6, <nm_movspr
-cmdname_hi: .byte >nm_palette, >nm_sprite, >nm_sprptr, >nm_sound, >nm_play, >nm_vol, >nm_filter, >nm_sid6, >nm_movspr
+cmdname_lo: .byte <nm_palette, <nm_sprite, <nm_sprptr, <nm_sound, <nm_play, <nm_vol, <nm_filter, <nm_sid6, <nm_movspr, <nm_sprsav
+cmdname_hi: .byte >nm_palette, >nm_sprite, >nm_sprptr, >nm_sound, >nm_play, >nm_vol, >nm_filter, >nm_sid6, >nm_movspr, >nm_sprsav
 fnname_lo:  .byte <nm_rpalette, <nm_rsprite, <nm_rsppos, <nm_bump
 fnname_hi:  .byte >nm_rpalette, >nm_rsprite, >nm_rsppos, >nm_bump
 nm_palette: .byte "PALETT", 'E'+$80
@@ -2003,6 +2197,7 @@ nm_vol:     .byte "VO", 'L'+$80
 nm_filter:  .byte "FILTE", 'R'+$80
 nm_sid6:    .byte "SID", '6'+$80
 nm_movspr:  .byte "MOVSP", 'R'+$80
+nm_sprsav:  .byte "SPRSA", 'V'+$80
 nm_rsprite: .byte "RSPRIT", 'E'+$80
 nm_rsppos:  .byte "RSPPO", 'S'+$80
 nm_bump:    .byte "BUM", 'P'+$80
@@ -2174,6 +2369,9 @@ sm_bit:     .byte 0
 sm_base:    .byte 0
 sm_y:       .byte 0
 tmpa2:      .byte 0
+sv_adr:     .word 0                   ; SPRSAV
+sv_y:       .byte 0
+vbank:      .byte 0
 fil6:       .fill 10, 0               ; filter/volume, 5 bytes per SID:
                                       ; +0/+1 cut-off, +2 resonance/routing,
                                       ; +3 type/volume, +4 current type/volume
@@ -2185,7 +2383,7 @@ ram_end:
             .assert (sysvec & $FF) != $FF, "vector sysvec at $xxFF"
             .assert (old_irq & $FF) != $FF, "vector old_irq at $xxFF"
             .assert (old_sysvec & $FF) != $FF, "vector old_sysvec at $xxFF"
-            .assert ram_end <= $1B80, "RAM part overlaps the six-voice sound tables at $1B80"
+            .assert ram_end <= $1C00, "RAM part larger than 1K"
             .rend
             .assert * < $FF05, "RAM image runs into the interrupt code at $FF05"
 

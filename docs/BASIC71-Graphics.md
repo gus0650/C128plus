@@ -9,6 +9,7 @@ chip:
 | `MOVSPR` | BASIC 7.0's `MOVSPR`, for sprites 1–24, including automatic movement |
 | `RSPRITE()`, `RSPPOS()` | BASIC 7.0's functions, for sprites 1–24 |
 | `BUMP()` | BASIC 7.0's collision function, with values 3–6 for sprites 9–24 |
+| `SPRSAV` | BASIC 7.0's `SPRSAV`, for sprites 1–24 |
 | `SPRPTR` | choose the shape of any of the 24 sprites |
 | `PALETTE` | program the 256-colour palette, switch it on and off |
 | `RPALETTE()` | read a palette entry |
@@ -96,13 +97,47 @@ So sprites 1, 9 and 17 share one shape until you change it.
 
 It only supports RAM bank 0.
 
-To design shapes for sprites 9–24, use BASIC's sprite tools on sprites 1–8,
-then point the others at those blocks. Sprite 1 uses block 56, sprite 2
-block 57, and so on:
+To design shapes for sprites 9–24, use BASIC's sprite editor `SPRDEF` on
+sprites 1–8. Then either point the others at those blocks (sprite 1 uses
+block 56, sprite 2 block 57, and so on), or copy the shape with `SPRSAV`:
 
 ```
 SPRDEF                    : REM draw the shape as sprite 2 in the sprite editor
-SPRPTR 10,57              : REM sprite 10 gets sprite 2's shape
+SPRPTR 10,57              : REM sprite 10 shows sprite 2's block
+SPRPTR 11,60:SPRSAV 2,11  : REM sprite 11 gets its own copy in block 60
+```
+
+### SPRSAV
+
+```
+SPRSAV source, destination
+```
+
+Same as BASIC 7.0's `SPRSAV`, with sprites **1–24**. Source and destination
+are each a sprite number or a string:
+
+| Form | Effect |
+|---|---|
+| `SPRSAV n, A$` | copy the shape of sprite *n* into `A$` (67 bytes, as BASIC 7.0) |
+| `SPRSAV A$, n` | copy `A$` into the shape of sprite *n* |
+| `SPRSAV n, m` | copy the shape of sprite *n* to sprite *m* |
+
+Where the shape is:
+
+- **sprites 1–8:** BASIC's sprite area, blocks 56–63 at `$0E00`, exactly as
+  in BASIC 7.0, wherever their pointer points
+- **sprites 9–24:** the block their pointer selects, so set it with `SPRPTR`
+  first. At start-up sprites 9–24 point at blocks 56–63, so `SPRSAV A$,9`
+  without `SPRPTR` changes the shape of sprite 1 as well.
+
+Strings from `SPRSAV` are compatible with BASIC 7.0: shapes saved with
+`SPRSAV n,A$` and stored with `DSAVE` or as data work on any C128, and the
+other way round.
+
+```
+GRAPHIC 1:GRAPHIC 0       : REM reserve $1C00-$3FFF (blocks 112-255)
+SPRSAV 1,A$               : REM sprite 1's shape as a string
+FOR N=9 TO 16:SPRPTR N,231+N:SPRSAV A$,N:NEXT  : REM copies in blocks 240-247
 ```
 
 ### MOVSPR
@@ -326,8 +361,7 @@ colour. Line 20 takes it once round the colour wheel.
 
 | Command | For sprites 9–24 |
 |---|---|
-| `SPRDEF` | design the shape on sprites 1–8, then `SPRPTR` |
-| `SPRSAV` | load the shape into sprites 1–8, then `SPRPTR` |
+| `SPRDEF` | design the shape on sprites 1–8, then `SPRPTR` or `SPRSAV` |
 
 ## Test programs
 
@@ -336,10 +370,11 @@ goes through the commands step by step:
 
 1. sprites 1–24 in three rows, in 16 colours
 2. `SPRPTR`: row 2 changes to a checked shape, row 3 to a half-filled one
-3. sprite 12 double size, sprite 20 multicolour, then back
-4. `PALETTE`: white (sprites 2 and 18) goes through all 16 hues
-5. `RPALETTE(5)` after `PALETTE 5,9,12`: prints 156
-6. `PALETTE RESET`: stock colours
+3. `SPRSAV`: sprite 2's checked shape is copied to sprite 24
+4. sprite 12 double size, sprite 20 multicolour, then back
+5. `PALETTE`: white (sprites 2 and 18) goes through all 16 hues
+6. `RPALETTE(5)` after `PALETTE 5,9,12`: prints 156
+7. `PALETTE RESET`: stock colours
 
 ```
 DLOAD "GFXTEST"
@@ -387,7 +422,8 @@ collisions.
 
 ## How it works
 
-- **Keywords:** BASIC 7.1 stores `MOVSPR` as `$FE $48`, and `RSPRITE`,
+- **Keywords:** BASIC 7.1 stores `MOVSPR` as `$FE $48`, `SPRSAV` as
+  `$FE $49`, and `RSPRITE`,
   `RSPPOS` and `BUMP` as `$CE $41`–`$CE $43`.
 - **MOVSPR for sprites 9–24:** BASIC 7.1 doesn't have its own copy of
   `MOVSPR`'s maths. It puts the sprite's position and motion record into

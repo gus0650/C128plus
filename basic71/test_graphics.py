@@ -120,6 +120,26 @@ def main():
     prg = bytes(r[0x1C00:0x1C40])
     check('stored as BASIC 7.1 tokens', bytes([0xFE, 0x48]) in prg and bytes([0xCE, 0x41]) in prg and bytes([0xCE, 0x43]) in prg, prg.hex())
 
+    # --- SPRSAV for sprites 1-24
+    r[0x0E00:0x0E3F] = bytes(range(1, 64))                    # sprite 1 shape
+    r[0x0E40:0x0E80] = bytes(64)
+    r[0x0F00:0x0F40] = bytes(64)                               # block 60
+    r[0x0E40 + 0x40 * 1:0x0E40 + 0x40 * 2] = bytes([0xAA] * 64)  # block 58
+    do(m, 'SCNCLR:SPRSAV 1,A$:PRINT LEN(A$);ASC(A$);ASC(MID$(A$,63))')
+    check('SPRSAV 1,A$: 67 bytes from sprite 1', ' 67  1  63' in m.screen(), m.screen())
+    do(m, 'SPRPTR 10,60:SPRSAV A$,10')
+    check('SPRSAV A$,10: into block 60 (sprite 10\'s pointer)', bytes(r[0x0F00:0x0F3F]) == bytes(range(1, 64)), bytes(r[0x0F00:0x0F08]).hex())
+    do(m, 'SCNCLR:SPRSAV 10,B$:PRINT LEN(B$);ASC(MID$(B$,2));B$=A$')
+    check('SPRSAV 10,B$: from block 60', ' 67  2 -1' in m.screen(), m.screen())
+    do(m, 'SPRPTR 9,58:SPRSAV 9,10')
+    check('SPRSAV 9,10: block 58 -> block 60', bytes(r[0x0F00:0x0F3F]) == bytes([0xAA] * 63), bytes(r[0x0F00:0x0F08]).hex())
+    do(m, 'SPRSAV 1,2')
+    check('SPRSAV 1,2: as BASIC 7.0 ($0E00 -> $0E40)', bytes(r[0x0E40:0x0E7F]) == bytes(range(1, 64)), bytes(r[0x0E40:0x0E48]).hex())
+    do(m, 'SCNCLR:SPRSAV 25,A$')
+    check('SPRSAV 25 is ILLEGAL QUANTITY', 'ILLEGAL' in m.screen())
+    m.type('NEW\r20 SPRSAV 9,A$:SPRSAV A$,17\rLIST\r'); m.run(150000)
+    check('LIST shows SPRSAV', m.screen().count('20 SPRSAV 9,A$:SPRSAV A$,17') == 2, m.screen())
+
     do(m, 'SCNCLR:POKE 53311,0:PALETTE 1,1,1')
     check('locked: PALETTE is ILLEGAL QUANTITY', 'ILLEGAL' in m.screen())
     do(m, 'SCNCLR:SPRITE 10,1')

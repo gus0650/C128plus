@@ -18,6 +18,7 @@ BASIC 7.1 is being built in stages:
 | 2 | `PALETTE`, `RPALETTE()` | done, tested on MiSTer |
 | 3 | `SPRITE`, `SPRPTR` for sprites 1–24 | done, tested on MiSTer |
 | 4 | `MOVSPR` with automatic movement for all 24 sprites, `RSPRITE`, `RSPPOS`, `BUMP` | done, tested on MiSTer except collisions (`test/colltest`) |
+| 4b | `SPRSAV` for sprites 1–24 | done, to be tested on MiSTer (`test/gfxtest`) |
 | 6 | six-voice sound: `SOUND`, `PLAY`, `VOL`, `FILTER` for voices 1–6, `SID6 ON/OFF` | done, tested on MiSTer |
 
 ## Commands so far
@@ -31,6 +32,7 @@ BASIC 7.1 is being built in stages:
 | `SPRITE n [,e [,c [,p [,x [,y [,r]]]]]]` | as BASIC 7.0's `SPRITE`, for sprites 1–24: enable, colour 1–16, background priority, x/y expansion, multicolour |
 | `SPRPTR n,block` | sprite n (1–24) shows the 64-byte shape in block 0–255 of the VIC's 16K bank |
 | `MOVSPR n,...` | as BASIC 7.0's `MOVSPR` (absolute, relative, distance;angle, angle#speed), for sprites 1–24 |
+| `SPRSAV src,dst` | as BASIC 7.0's `SPRSAV`, for sprites 1–24; sprites 9–24 use the block their pointer selects |
 | `RSPPOS(n,a)`, `RSPRITE(n,a)` | as BASIC 7.0's functions, for sprites 1–24 |
 | `BUMP(t)` | 1/2 as BASIC 7.0 (sprites 1–8); 3/4 for sprites 9–16, 5/6 for 17–24 (sprite-sprite / sprite-screen) |
 
@@ -70,7 +72,7 @@ Inside, BASIC 7.1 has its own sound engine for all six voices, with the same alg
 - **New keywords:** BASIC 7.1 hooks BASIC 7.0's escape-token vectors for tokenizing (`$030C`), listing (`$030E`) and executing statements (`$0310`) and functions (`$02FC`). BASIC 7.1 statements are `$FE $40` and up, functions `$CE $40` and up, above BASIC's own escape tokens.
 - **Running BASIC 7.1 code:** while BASIC 7.1 code runs, the MMU maps the BASIC 7.1 ROM at `$C000` with both BASIC ROMs and I/O visible (configuration `$10`). The Kernal is not visible then, and BASIC switches the memory map while it reads variables. So every call into BASIC or the Kernal goes through a small routine in RAM that calls it with the Kernal's `JSRFAR` in the normal BASIC map. `JSRFAR` returns through common RAM, so this also works for BASIC routines that return with RAM bank 1 switched in.
 - **Interrupts:** the interrupt entry and exit code at `$FF05–$FF41` is byte-identical to the Kernal's, because the CPU continues in the other copy at the same address when the map changes.
-- **RAM:** BASIC 7.1 uses `$1800–$1B7F` (879 bytes so far, of 896), part of the 1K that the C128 Kernal reserves for function ROM software. It also uses the Kernal's `JSRFAR` parameters at `$02–$08`, which BASIC itself only uses for `SYS`.
+- **RAM:** BASIC 7.1 uses `$1800–$1BFF` (911 bytes so far, of 1024), part of the 1K that the C128 Kernal reserves for function ROM software. It also uses the Kernal's `JSRFAR` parameters at `$02–$08`, which BASIC itself only uses for `SYS`.
 
 ## Building and testing
 
