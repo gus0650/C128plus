@@ -17,7 +17,7 @@ It comes with BASIC 7.1 that supports these new features natively.
 
 It scraps the CP/M subsystem to save cost. So no Z80 and no VDC chip.
 
-Some consider this machine the ultimate 8-bit homecomputer and the pinnacle of CBM's 6502-based product line!
+Some consider the ultimate 8-bit homecomputer and the pinnacle of CBM's 6502-based product line!
 
 Notes:
 
